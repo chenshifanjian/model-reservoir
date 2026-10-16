@@ -909,6 +909,14 @@ td .sub-cell { font-size: 11px; color: var(--text-secondary); margin-top: 2px; }
 .provider-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px; gap: 6px; flex-wrap: wrap; }
 /* 卡片头上一眼能看到"这个上游带来多少模型"，省得点进模型管理才知道 */
 .provider-meta { font-size: 11px; color: var(--text-secondary); white-space: nowrap; }
+/* 免费徽章：仅免费(绿) / 含付费(橙) / 未核实(灰) —— 颜色只做点缀，信息以文字为准 */
+.free-badge {
+  font-size: 11px; padding: 1px 6px; border-radius: 999px; white-space: nowrap;
+  border: 1px solid transparent; cursor: help;
+}
+.free-free  { color: var(--success); background: color-mix(in srgb, var(--success) 12%, transparent); border-color: color-mix(in srgb, var(--success) 30%, transparent); }
+.free-paid  { color: var(--warning, #d97706); background: color-mix(in srgb, var(--warning, #d97706) 14%, transparent); border-color: color-mix(in srgb, var(--warning, #d97706) 32%, transparent); }
+.free-unknown { color: var(--text-secondary); background: color-mix(in srgb, var(--text-secondary) 10%, transparent); border-color: color-mix(in srgb, var(--text-secondary) 25%, transparent); }
 /* poll-bar 里的竖线分隔：浅色主题下白线看不见，改跟边框同色 */
 .sep { display: inline-block; width: 1px; height: 12px; background: var(--mac-border); margin: 0 8px; vertical-align: -1px; }
 @media (max-width: 900px) {
@@ -1382,6 +1390,16 @@ td .sub-cell { font-size: 11px; color: var(--text-secondary); margin-top: 2px; }
         </div>
         <div id="pf_verify_status" style="font-size:12px; margin-top:6px; min-height:16px;"></div>
       </div>
+      <div class="form-field">
+        <label>免费标记</label>
+        <select id="pf_free_override">
+          <option value="auto">自动判定（按证据分级，推荐）</option>
+          <option value="free">强制"仅免费"（我确认这个上游不花钱）</option>
+          <option value="paid">强制"含付费"（按量计费/走套餐额度）</option>
+          <option value="unknown">标"未核实"（不想下结论）</option>
+        </select>
+        <div class="form-hint">自动判定的依据：上游自报 pricing → 模型名免费后缀 → 本机/内网 → 公开价目源</div>
+      </div>
       <div id="providerModalMsg" style="font-size: 12px; display: none;"></div>
     </div>
     <div class="modal-footer">
@@ -1657,12 +1675,46 @@ const ICON = {
    这样深浅色主题、徽章与被选中态都能自动跟着文字色走，不像 emoji 那样各系统各画一套 */
 const _svg = p => '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">' + p + '</svg>';
 
+// ---------- 免费标记：按证据分级渲染（不再直接信 free_only 配置位） ----------
+// 老版直接渲染配置位 free_only（添加时写死 true），deepseek 这种按量计费的上游也标"仅免费"。
+// 现在后端按证据分级（上游价目 > 免费后缀 > 本机/内网 > 公开源目源）算出 free_status。
+const FREE_BADGE_LABEL = { free: '仅免费', paid: '含付费', unknown: '未核实' };
+const FREE_SOURCE_LABEL = { upstream: '上游自报价目', name: '免费后缀', local: '本机/内网', oracle: '公开价目源' };
+let PRICE_SOURCE = null;   // /api/price-source 的元信息，进 tooltip 说明依据新鲜度
+
+function freeBadgeHTML(st) {
+  if (!st) return '';
+  let badge = st.badge || 'unknown';
+  let manual = false;
+  if (badge.indexOf('override:') === 0) { badge = badge.slice(9); manual = true; }
+  const label = (FREE_BADGE_LABEL[badge] || '未核实') + (manual ? '(人工)' : '');
+  const srcParts = Object.entries(st.sources || {})
+    .filter(([k, v]) => FREE_SOURCE_LABEL[k] && v > 0)
+    .map(([k, v]) => FREE_SOURCE_LABEL[k] + '×' + v);
+  const lines = [
+    '启用模型 ' + st.models_total + ' 个：免费 ' + st.free + ' / 付费 ' + st.paid + ' / 未核实 ' + st.unknown,
+    srcParts.length ? '判定依据：' + srcParts.join('、') : '没有任何免费证据 → 不标"仅免费"',
+  ];
+  if ((st.sources || {}).oracle && PRICE_SOURCE && PRICE_SOURCE.fetched_at) {
+    const d = new Date(PRICE_SOURCE.fetched_at * 1000);
+    lines.push('价目源：' + (PRICE_SOURCE.source || '公开价目源') + ' 收录 ' + PRICE_SOURCE.models + ' 个模型，' + d.toLocaleString() + ' 抓取');
+  }
+  if (st.conflicts) lines.push('⚠ ' + st.conflicts + ' 个模型：上游自报价目与公开价目源不一致');
+  if (manual) lines.push('人工覆盖，已盖过自动判定');
+  const tip = lines.join(String.fromCharCode(10)).replace(/"/g, '&quot;');
+  return '<span class="free-badge free-' + badge + '" title="' + tip + '">' + label + '</span>';
+}
+
 async function load() {
   try {
     if (!_detailsLoaded) {
       await loadModelDetails();
       _detailsLoaded = true;
     }
+    try {
+      const ps = await apiFetch('/api/price-source');
+      PRICE_SOURCE = await ps.json();
+    } catch (e) { PRICE_SOURCE = null; }
     const r = await apiFetch('/api/providers');
     const list = await r.json();
     data = [];
@@ -1677,7 +1729,7 @@ async function load() {
           <div class="provider-head">
             <div style="display: flex; align-items: baseline; gap: 8px; min-width: 0;">
               <div class="p-name" style="margin-bottom: 0;">${p.name}</div>
-              <span class="provider-meta">${(p.models || []).length} 个模型${(p.disabled_models || []).length ? ' · ' + p.disabled_models.length + ' 个已禁用' : ''}${p.free_only ? ' · 仅免费' : ''}</span>
+              <span class="provider-meta">${(p.models || []).length} 个模型${(p.disabled_models || []).length ? ' · ' + p.disabled_models.length + ' 个已禁用' : ''} ${freeBadgeHTML(p.free_status)}</span>
             </div>
             <div style="display: flex; gap: 4px; flex-shrink: 0; align-items: center;">
               <button class="btn btn-icon btn-icon-sm" title="管理模型列表" aria-label="管理模型列表" onclick="openModelManager('${p.name}')">${ICON.list}</button>
@@ -2122,6 +2174,8 @@ async function openProviderEditor(name) {
       const list = await r.json();
       const p = list.find(x => x.name === name) || {};
       document.getElementById('pf_base_url').value = p.base_url || '';
+      document.getElementById('pf_free_override').value =
+        (p.free_status && p.free_status.override) || 'auto';
     } catch (e) { if (e.message !== 'Unauthorized') console.error(e); }
     document.getElementById('pf_api_key').value = '';
     document.getElementById('pf_api_key').placeholder = '留空表示不修改密钥';
@@ -2135,6 +2189,7 @@ async function openProviderEditor(name) {
     document.getElementById('pf_base_url').value = '';
     document.getElementById('pf_api_key').value = '';
     document.getElementById('pf_api_key').placeholder = 'sk-...';
+    document.getElementById('pf_free_override').value = 'auto';
   }
   document.getElementById('pf_show_key').checked = false;
   document.getElementById('pf_api_key').type = 'password';
@@ -2386,10 +2441,12 @@ async function submitProviderForm() {
       res = await apiFetch('/api/providers', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ name, base_url: baseUrl, api_key: apiKey, free_only: freeOnly })
+        body: JSON.stringify({ name, base_url: baseUrl, api_key: apiKey, free_only: freeOnly,
+                               free_status_override: document.getElementById('pf_free_override').value })
       });
     } else {
-      const body = { base_url: baseUrl, free_only: freeOnly };
+      const body = { base_url: baseUrl, free_only: freeOnly,
+                     free_status_override: document.getElementById('pf_free_override').value };
       if (apiKey) body.api_key = apiKey;
       res = await apiFetch('/api/providers/' + encodeURIComponent(providerEditName), {
         method: 'PUT',

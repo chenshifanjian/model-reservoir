@@ -473,6 +473,243 @@ def is_free_by_name(model_id: str) -> bool:
     return ":free" in lower or "-free" in lower
 
 
+# ============================================================
+# 免费/付费判定：证据分级（2026-10-15）
+# ============================================================
+# 老逻辑的问题：「仅免费」标签直接渲染配置位 free_only（添加时前端写死 true），
+# 而 fetch_models 在上游既不给 pricing、模型名也不含 -free 时会兜底返回全部模型，
+# 于是 deepseek 这种明确按量计费的上游也被标成"仅免费"——标签在撒谎。
+# 改为按证据强度分级判定，没有证据就老实说「未核实」：
+#   E1 上游 /models 自带 pricing（厂商自己报的，最权威）
+#   E2 模型名以 :free / -free 结尾（OpenRouter/Groq 系命名惯例）
+#   E3 base_url 是本机或内网（自建部署，没有按量计费；电费另算）
+#   E4 公开价目源（OpenRouter /models，7 天缓存）按归一化名命中
+#   全无证据 → unknown
+# 冲突时以更强证据为准，但打 conflict 标记，前端 tooltip 里会说人话。
+FREE_NAME_SUFFIXES = (":free", "-free", "/free", "_free")
+PRICE_ORACLE_URL = "https://openrouter.ai/api/v1/models"
+PRICE_ORACLE_TTL = 7 * 86400  # 秒；价目缓存有效期
+_LOOPBACK_HOSTS = {"localhost", "127.0.0.1", "::1", "0.0.0.0"}
+
+
+def has_free_name(model_id: str) -> bool:
+    """模型名是否带免费后缀（只看末段，避免把 供应商/free-xxx 之类的前缀误判）。"""
+    tail = model_id.lower().split("/")[-1]
+    return any(tail.endswith(sfx) for sfx in FREE_NAME_SUFFIXES)
+
+
+def _url_host(base_url: str) -> str:
+    m = re.match(r"^[a-zA-Z][a-zA-Z0-9+.\-]*://([^/:?#]+)", (base_url or "").strip())
+    return m.group(1).lower() if m else ""
+
+
+def is_local_base_url(base_url: str) -> bool:
+    """本机/内网地址 → 自建部署，没有按量计费。"""
+    host = _url_host(base_url)
+    if not host:
+        return False
+    if host in _LOOPBACK_HOSTS or host.endswith(".local"):
+        return True
+    parts = host.split(".")
+    if len(parts) == 4 and all(p.isdigit() for p in parts):
+        a, b = int(parts[0]), int(parts[1])
+        if a == 10 or (a == 192 and b == 168) or (a == 169 and b == 254):
+            return True
+        if a == 172 and 16 <= b <= 31:
+            return True
+    return False
+
+
+def _parse_price(value) -> float | None:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def classify_model_free(
+    model_id: str,
+    *,
+    upstream_pricing: dict | None = None,
+    base_url: str = "",
+    oracle: dict | None = None,
+    local: bool | None = None,
+) -> dict:
+    """按证据分级判定单个模型是否免费。
+
+    返回 {"status": "free|paid|unknown", "source": "upstream|name|local|oracle|none",
+          "price": [输入单价, 输出单价] 或 None, "conflict": bool}
+    """
+    if local is None:
+        local = is_local_base_url(base_url)
+    oracle_hit = None
+    if isinstance(oracle, dict):
+        oracle_hit = (oracle.get("tail") or {}).get(model_id.lower().split("/")[-1])
+
+    # E1 上游自报 pricing（最权威）
+    if isinstance(upstream_pricing, dict):
+        ip = _parse_price(upstream_pricing.get("prompt"))
+        op = _parse_price(upstream_pricing.get("completion"))
+        if ip is not None and op is not None:
+            verdict = "free" if ip == 0 and op == 0 else "paid"
+            conflict = bool(oracle_hit) and (
+                (verdict == "free" and (oracle_hit[0] > 0 or oracle_hit[1] > 0))
+                or (verdict == "paid" and oracle_hit[0] == 0 and oracle_hit[1] == 0)
+            )
+            return {"status": verdict, "source": "upstream", "price": [ip, op], "conflict": conflict}
+
+    # E2 命名惯例
+    if has_free_name(model_id):
+        return {"status": "free", "source": "name", "price": None, "conflict": False}
+
+    # E3 本机/内网自建
+    if local:
+        return {"status": "free", "source": "local", "price": None, "conflict": False}
+
+    # E4 公开价目源
+    if oracle_hit:
+        ip, op = float(oracle_hit[0]), float(oracle_hit[1])
+        return {
+            "status": "free" if ip == 0 and op == 0 else "paid",
+            "source": "oracle",
+            "price": [ip, op],
+            "conflict": False,
+        }
+
+    return {"status": "unknown", "source": "none", "price": None, "conflict": False}
+
+
+# ---------- 公开价目源（只读、可关、失败不致命） ----------
+def _price_cache_path() -> Path:
+    return DATA_DIR / "pricing_cache.json"
+
+
+def _price_oracle_enabled() -> bool:
+    return os.environ.get("GATEWAY_PRICE_ORACLE", "1").lower() not in ("0", "false", "no")
+
+
+def _read_price_cache() -> dict:
+    """读价目缓存；文件缺失/损坏/结构不对一律当没缓存，绝不抛。"""
+    try:
+        raw = json.loads(_price_cache_path().read_text(encoding="utf-8"))
+        tail = raw.get("tail")
+        if isinstance(tail, dict):
+            return {
+                "tail": {
+                    str(k).lower(): [float(v[0]), float(v[1])]
+                    for k, v in tail.items()
+                    if isinstance(v, (list, tuple)) and len(v) == 2
+                },
+                "fetched_at": float(raw.get("fetched_at") or 0),
+                "source": raw.get("source") or "openrouter",
+            }
+    except Exception:
+        pass
+    return {"tail": {}, "fetched_at": 0.0, "source": "openrouter"}
+
+
+def _write_price_cache(data: dict) -> None:
+    try:
+        _price_cache_path().write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+    except Exception:
+        logger.exception("写价目缓存失败")
+
+
+async def _fetch_price_oracle() -> dict | None:
+    """拉公开价目源（无需 key，只读）。失败返回 None，绝不抛。"""
+    if http_client is None:
+        return None
+    try:
+        resp = await http_client.get(PRICE_ORACLE_URL, timeout=15)
+        if resp.status_code != 200:
+            return None
+        payload = resp.json()
+        items = payload.get("data") if isinstance(payload, dict) else payload
+        if not isinstance(items, list):
+            return None
+        tail: dict[str, list] = {}
+        for m in items:
+            if not isinstance(m, dict):
+                continue
+            mid = str(m.get("id", "")).lower()
+            pricing = m.get("pricing") or {}
+            ip = _parse_price(pricing.get("prompt"))
+            op = _parse_price(pricing.get("completion"))
+            if not mid or ip is None or op is None:
+                continue
+            tail[mid.split("/")[-1]] = [ip, op]
+        if not tail:
+            return None
+        return {"tail": tail, "fetched_at": time.time(), "source": "openrouter"}
+    except Exception:
+        logger.exception("价目源拉取失败")
+        return None
+
+
+async def _bg_refresh_price_oracle() -> None:
+    try:
+        fresh = await _fetch_price_oracle()
+        if fresh:
+            _write_price_cache(fresh)
+    except Exception:
+        logger.exception("后台刷新价目源失败")
+
+
+async def get_price_oracle(refresh_if_stale: bool = False) -> dict:
+    """拿价目源。默认只读缓存（过期就在后台悄悄刷，页面不等网络）。"""
+    data = _read_price_cache()
+    if not _price_oracle_enabled():
+        return data
+    if (time.time() - data["fetched_at"]) > PRICE_ORACLE_TTL:
+        if refresh_if_stale:
+            fresh = await _fetch_price_oracle()
+            if fresh:
+                _write_price_cache(fresh)
+                return fresh
+        else:
+            try:
+                asyncio.create_task(_bg_refresh_price_oracle())
+            except RuntimeError:
+                pass  # 没有运行中的事件循环（单测同步调用路径）
+    return data
+
+
+def summarize_provider_free(provider: dict, oracle: dict | None = None) -> dict:
+    """提供商级免费概览：只统计启用中的模型，按证据分级。
+
+    badge：paid（含付费）> unknown（未核实）> free（仅免费）——
+    只有全部启用模型都验证为免费，才敢说「仅免费」。
+    """
+    override = str(provider.get("free_status_override") or "auto").strip().lower()
+    if oracle is None:
+        oracle = _read_price_cache()
+    models = get_enabled_models(provider)
+    upstream = provider.get("model_pricing") or {}
+    base_url = provider.get("base_url", "")
+    counts = {"free": 0, "paid": 0, "unknown": 0}
+    sources: dict[str, int] = {}
+    conflicts = 0
+    for m in models:
+        v = classify_model_free(
+            m, upstream_pricing=upstream.get(m), base_url=base_url, oracle=oracle
+        )
+        counts[v["status"]] += 1
+        sources[v["source"]] = sources.get(v["source"], 0) + 1
+        if v["conflict"]:
+            conflicts += 1
+    badge = "paid" if counts["paid"] else ("unknown" if counts["unknown"] else "free")
+    if override in ("free", "paid", "unknown"):
+        badge = f"override:{override}"
+    return {
+        "badge": badge,
+        "override": override,
+        "models_total": len(models),
+        **counts,
+        "conflicts": conflicts,
+        "sources": sources,
+    }
+
+
 def get_enabled_models(provider: dict) -> list[str]:
     """返回该 provider 未被禁用的模型列表"""
     disabled = set(provider.get("disabled_models", []))
@@ -795,16 +1032,25 @@ async def fetch_model_details(base_url: str, api_key: str) -> dict:
     return {}
 
 
-async def fetch_models(base_url: str, api_key: str, free_only: bool = True) -> list[str]:
+async def fetch_models_with_pricing(base_url: str, api_key: str, free_only: bool = True) -> tuple[list[str], dict[str, dict]]:
+    """拉模型列表，顺带把上游自报的 pricing 一并带回来（有的话）。
+
+    返回 (模型名列表, {模型名: {"prompt": ..., "completion": ...}})。
+    pricing 只有 OpenRouter/SiliconFlow 这类"价目开放"的上游才给，其余为空 dict。
+    """
     url = base_url.rstrip("/") + "/models"
     headers = {"Authorization": f"Bearer {api_key}"}
+    pricing_map: dict[str, dict] = {}
     try:
         resp = await http_client.get(url, headers=headers, timeout=15)
         if resp.status_code == 200:
             data = resp.json()
             model_list = data.get("data", data) if isinstance(data, dict) else data
             if not isinstance(model_list, list):
-                return []
+                return [], pricing_map
+            for m in model_list:
+                if isinstance(m, dict) and "id" in m and isinstance(m.get("pricing"), dict):
+                    pricing_map[m["id"]] = dict(m["pricing"])
             if free_only:
                 has_pricing = any(isinstance(m, dict) and m.get("pricing") for m in model_list)
                 if has_pricing:
@@ -813,21 +1059,25 @@ async def fetch_models(base_url: str, api_key: str, free_only: bool = True) -> l
                         if isinstance(m, dict) and "id" in m and is_free_model(m)
                     ]
                     if free_by_api:
-                        return [m["id"] for m in free_by_api if is_chat_model(m["id"])]
+                        return [m["id"] for m in free_by_api if is_chat_model(m["id"])], pricing_map
                 free_by_name = [
                     m["id"] for m in model_list
                     if isinstance(m, dict) and "id" in m
                     and is_free_by_name(m["id"]) and is_chat_model(m["id"])
                 ]
                 if free_by_name:
-                    return free_by_name
+                    return free_by_name, pricing_map
             return [
                 m["id"] for m in model_list
                 if "id" in m and isinstance(m, dict) and is_chat_model(m["id"])
-            ]
+            ], pricing_map
     except Exception:
         logger.exception("fetch_models failed for %s", base_url)
-    return []
+    return [], pricing_map
+
+
+async def fetch_models(base_url: str, api_key: str, free_only: bool = True) -> list[str]:
+    return (await fetch_models_with_pricing(base_url, api_key, free_only))[0]
 
 
 async def verify_provider_key_impl(base_url: str, api_key: str) -> dict:
@@ -989,6 +1239,10 @@ class ProviderIn(BaseModel):
     api_key: str
     models: list[str] = []
     free_only: bool = True
+    # 免费标记人工覆盖：auto（按证据分级自动判定）| free | paid | unknown
+    free_status_override: str = "auto"
+    # 上游 /models 自报的价目（拉模型列表时顺带存下），是"免费"判定最权威的证据
+    model_pricing: dict[str, dict] = {}
 
 
 class ProviderUpdate(BaseModel):
@@ -997,6 +1251,7 @@ class ProviderUpdate(BaseModel):
     api_key: str | None = None
     models: list[str] | None = None
     free_only: bool | None = None
+    free_status_override: str | None = None
 
 
 class ToggleModelIn(BaseModel):
@@ -1721,6 +1976,8 @@ def _do_swap_and_restart(new_exe: str):
 @app.get("/api/providers")
 async def list_providers(_=Depends(verify_admin)):
     result = []
+    # 只读价目缓存（过期就后台悄悄刷新，不让页面等网络）
+    oracle = await get_price_oracle()
 
     for p in providers:
         item = {
@@ -1730,6 +1987,7 @@ async def list_providers(_=Depends(verify_admin)):
             "models": p.get("models", []),
             "disabled_models": p.get("disabled_models", []),
             "free_only": p.get("free_only", True),
+            "free_status": summarize_provider_free(p, oracle),
             "health": {},
         }
         for m in p.get("models", []):
@@ -1737,6 +1995,18 @@ async def list_providers(_=Depends(verify_admin)):
             item["health"][m] = health_status.get(k, {"status": "unknown"})
         result.append(item)
     return result
+
+
+@app.get("/api/price-source")
+async def price_source_info(_=Depends(verify_admin)):
+    """公开价目源的元信息（来源、抓取时间、收录模型数），供前端 tooltip 说人话。"""
+    oracle = await get_price_oracle()
+    return {
+        "enabled": _price_oracle_enabled(),
+        "source": oracle.get("source"),
+        "fetched_at": oracle.get("fetched_at"),
+        "models": len(oracle.get("tail") or {}),
+    }
 
 
 @app.post("/api/providers")
@@ -1752,7 +2022,12 @@ async def add_provider(data: ProviderIn, _=Depends(verify_admin)):
             if p["name"] == data.name:
                 raise HTTPException(400, "名称已存在")
         if not data.models:
-            data.models = await fetch_models(data.base_url, data.api_key, data.free_only)
+            models, pricing = await fetch_models_with_pricing(
+                data.base_url, data.api_key, data.free_only
+            )
+            data.models = models
+            if pricing:
+                data.model_pricing = pricing  # 上游自报价目，作为"免费"判定的最权威证据
         providers.append(data.model_dump())
         save_providers(providers)
     return {"ok": True}
@@ -1852,7 +2127,9 @@ async def apply_preset(data: PresetApplyIn, _=Depends(verify_admin)):
                 if plat_name in existing_names:
                     providers[:] = [p for p in providers if p["name"] != plat_name]
                     existing_names.discard(plat_name)
-                fetched = await fetch_models(plat_cfg["base_url"], key, plat_cfg.get("free_only", True))
+                fetched, pricing = await fetch_models_with_pricing(
+                    plat_cfg["base_url"], key, plat_cfg.get("free_only", True)
+                )
                 visible = plat_cfg.get("models_visible", [])
                 if visible:
                     models = [m for m in fetched if m in set(visible)]
@@ -1870,6 +2147,7 @@ async def apply_preset(data: PresetApplyIn, _=Depends(verify_admin)):
                     "models": models,
                     "disabled_models": disabled,
                     "free_only": plat_cfg.get("free_only", True),
+                    **({"model_pricing": pricing} if pricing else {}),
                 })
                 existing_names.add(plat_name)
                 created_names.append(plat_name)
@@ -1899,9 +2177,13 @@ async def refresh_models(name: str, _=Depends(verify_admin)):
     async with providers_lock:
         for p in providers:
             if p["name"] == name:
-                models = await fetch_models(p["base_url"], p["api_key"], p.get("free_only", True))
+                models, pricing = await fetch_models_with_pricing(
+                    p["base_url"], p["api_key"], p.get("free_only", True)
+                )
                 if models:
                     p["models"] = models
+                    if pricing:
+                        p["model_pricing"] = pricing  # 存下上游自报价目
                     save_providers(providers)
                 return {"ok": True, "models": models}
     raise HTTPException(404, "未找到")

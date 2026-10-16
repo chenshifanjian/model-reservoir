@@ -1,6 +1,7 @@
 import pytest
 import json
 import sys
+import asyncio
 from pathlib import Path
 
 # 让测试能 import app
@@ -918,3 +919,156 @@ def test_stability_endpoint_prefers_live_health_over_history(monkeypatch):
     m2 = res.json()[0]
     assert m2["last_code"] == 429 and m2["last_reason"] == "触发限流"
     app_module._stability_cache.clear()
+
+
+# ============================================================
+# 免费/付费判定：证据分级（2026-10-15）
+# ============================================================
+# 背景回归：旧版「仅免费」直接渲染配置位 free_only（添加时前端写死 true），
+# deepseek 这种按量计费的上游也被标"仅免费"。现在按证据分级，没证据就不许说免费。
+ORACLE = {"tail": {"deepseek-chat": [0.0000027, 0.000011], "demo-free": [0, 0]}}
+
+
+def _prov(models, base_url="https://api.example.com/v1", **kw):
+    return {"name": "P", "base_url": base_url, "api_key": "k",
+            "models": models, "disabled_models": [], **kw}
+
+
+def test_classify_upstream_pricing_zero_is_free():
+    v = app_module.classify_model_free("x", upstream_pricing={"prompt": "0", "completion": "0"}, oracle=ORACLE)
+    assert v["status"] == "free" and v["source"] == "upstream"
+
+
+def test_classify_upstream_pricing_paid():
+    v = app_module.classify_model_free("deepseek/deepseek-chat",
+                                       upstream_pricing={"prompt": "0.0027", "completion": "0.011"})
+    assert v["status"] == "paid" and v["source"] == "upstream" and v["conflict"] is False
+
+
+def test_classify_upstream_vs_oracle_conflict_flagged():
+    # 上游说免费、价目源说付费 → 以上游为准，但打冲突标记（前端会提示）
+    v = app_module.classify_model_free("m", upstream_pricing={"prompt": "0", "completion": "0"},
+                                       oracle={"tail": {"m": [0.01, 0.02]}})
+    assert v["status"] == "free" and v["conflict"] is True
+
+
+def test_classify_name_suffix_free():
+    for mid in ("llama-3.3-70b:free", "vendor/model-free", "abc_free"):
+        v = app_module.classify_model_free(mid)
+        assert v["status"] == "free" and v["source"] == "name", mid
+
+
+def test_classify_free_prefix_not_false_positive():
+    # 只看末段后缀："free-" 开头的普通模型名不算免费
+    v = app_module.classify_model_free("free-model-x")
+    assert v["status"] == "unknown"
+
+
+def test_is_local_base_url():
+    for u in ("http://127.0.0.1:8000", "http://localhost/v1", "http://192.168.1.5:9000",
+              "http://10.1.2.3", "http://172.16.0.9", "http://172.31.255.1", "http://nas.local"):
+        assert app_module.is_local_base_url(u) is True, u
+    for u in ("https://api.deepseek.com", "https://model-llm.heilongxiake.cn/",
+              "http://172.32.0.1", "https://integrate.api.nvidia.com/v1"):
+        assert app_module.is_local_base_url(u) is False, u
+
+
+def test_classify_local_deploy_is_free():
+    v = app_module.classify_model_free("qwen/qwen3.8-27b", base_url="http://192.168.1.5:9000/v1")
+    assert v["status"] == "free" and v["source"] == "local"
+
+
+def test_classify_oracle_hit():
+    v = app_module.classify_model_free("deepseek/deepseek-chat", oracle=ORACLE)
+    assert v["status"] == "paid" and v["source"] == "oracle"
+    assert app_module.classify_model_free("demo-free", oracle=ORACLE)["status"] == "free"
+
+
+def test_classify_unknown_when_no_evidence():
+    v = app_module.classify_model_free("brand-new-model")
+    assert v["status"] == "unknown" and v["source"] == "none" and v["price"] is None
+
+
+def test_summarize_all_free_badge():
+    s = app_module.summarize_provider_free(_prov(["a-free", "b-free"]), oracle={"tail": {}})
+    assert s["badge"] == "free" and s["free"] == 2 and s["unknown"] == 0
+
+
+def test_summarize_paid_wins_over_free():
+    s = app_module.summarize_provider_free(_prov(["a-free", "deepseek-chat"]), oracle=ORACLE)
+    assert s["badge"] == "paid" and s["paid"] == 1 and s["free"] == 1
+
+
+def test_summarize_unknown_when_no_evidence():
+    s = app_module.summarize_provider_free(_prov(["brand-new", "another"]), oracle={"tail": {}})
+    assert s["badge"] == "unknown" and s["unknown"] == 2
+
+
+def test_summarize_disabled_models_not_counted():
+    p = _prov(["a-free", "paid-model"], disabled_models=["paid-model"])
+    s = app_module.summarize_provider_free(p, oracle={"tail": {"paid-model": [1, 1]}})
+    assert s["badge"] == "free" and s["models_total"] == 1
+
+
+def test_summarize_override_wins():
+    p = _prov(["brand-new"], free_status_override="free")
+    s = app_module.summarize_provider_free(p, oracle={"tail": {}})
+    assert s["badge"] == "override:free"
+
+
+def test_deepseek_never_labeled_free():
+    """回归锚点：deepseek 没有任何免费证据 → 必须是未核实，绝不能是仅免费。"""
+    p = _prov(["deepseek-chat", "deepseek-reasoner"], base_url="https://api.deepseek.com")
+    s = app_module.summarize_provider_free(p, oracle={"tail": {}})
+    assert s["badge"] == "unknown" and s["free"] == 0
+
+
+def test_fetch_models_with_pricing_returns_upstream_prices(monkeypatch):
+    class _Resp:
+        status_code = 200
+
+        def json(self):
+            return {"data": [
+                {"id": "m-free", "pricing": {"prompt": "0", "completion": "0"}},
+                {"id": "m-paid", "pricing": {"prompt": "0.01", "completion": "0.02"}},
+                {"id": "m-no-price"},
+            ]}
+
+    class _Client:
+        async def get(self, *a, **k):
+            return _Resp()
+
+    monkeypatch.setattr(app_module, "http_client", _Client())
+    ids, pricing = asyncio.run(app_module.fetch_models_with_pricing("http://x/v1", "k", free_only=False))
+    assert ids == ["m-free", "m-paid", "m-no-price"]
+    assert pricing["m-paid"]["prompt"] == "0.01" and "m-no-price" not in pricing
+
+
+def test_fetch_models_keeps_list_only_signature(monkeypatch):
+    class _Resp:
+        status_code = 200
+
+        def json(self):
+            return {"data": [{"id": "a"}, {"id": "b"}]}
+
+    class _Client:
+        async def get(self, *a, **k):
+            return _Resp()
+
+    monkeypatch.setattr(app_module, "http_client", _Client())
+    assert asyncio.run(app_module.fetch_models("http://x/v1", "k")) == ["a", "b"]
+
+
+def test_price_cache_roundtrip(tmp_path, monkeypatch):
+    monkeypatch.setattr(app_module, "DATA_DIR", tmp_path)
+    app_module._write_price_cache({"tail": {"deepseek-chat": [2.7e-6, 1.1e-5]},
+                                   "fetched_at": 123.0, "source": "openrouter"})
+    got = app_module._read_price_cache()
+    assert got["tail"]["deepseek-chat"] == [2.7e-6, 1.1e-5] and got["fetched_at"] == 123.0
+
+
+def test_price_cache_corrupt_file_is_safe(tmp_path, monkeypatch):
+    monkeypatch.setattr(app_module, "DATA_DIR", tmp_path)
+    (tmp_path / "pricing_cache.json").write_text("{oops", encoding="utf-8")
+    got = app_module._read_price_cache()
+    assert got["tail"] == {} and got["fetched_at"] == 0.0
