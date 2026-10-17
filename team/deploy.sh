@@ -39,8 +39,13 @@ step "0) 连通性与前置检查"
 step "1) 上传协调服务与单元文件"
 "${SSH[@]}" "mkdir -p $REMOTE_DIR"
 "${SCP[@]}" "$LOCAL_DIR/coordinator.py" "root@$HOST:$REMOTE_DIR/coordinator.py"
+"${SCP[@]}" "$LOCAL_DIR/protocol.py" "root@$HOST:$REMOTE_DIR/protocol.py"
+echo "  已上传 coordinator.py + protocol.py（密钥派生协议，两边共用避免漂移）"
 "${SCP[@]}" "$LOCAL_DIR/reservoir-team.service" "root@$HOST:/etc/systemd/system/reservoir-team.service"
 echo "  已上传"
+
+step "1b) 校验 protocol.py 可被 coordinator 导入"
+"${SSH[@]}" "cd $REMOTE_DIR && python3 -c 'import protocol; print(\"  protocol 导入 OK, N=\", protocol.SCRYPT_N)'" || die "protocol 导入失败"
 
 step "2) 保留既有数据（team.db 不覆盖）"
 "${SSH[@]}" "if [ -f $REMOTE_DIR/team.db ]; then
@@ -50,12 +55,15 @@ step "2) 保留既有数据（team.db 不覆盖）"
     echo '  首次部署，无既有数据'
   fi"
 
-step "3) 启用并启动 systemd 服务"
+step "3) 启用并重启 systemd 服务（必须 restart，enable --now 不会重启已在跑的进程）"
 "${SSH[@]}" 'set -e
   systemctl daemon-reload
-  systemctl enable --now reservoir-team
+  systemctl enable reservoir-team
+  # 关键：文件已更新但服务可能还在跑旧代码，enable --now 对已运行进程无效
+  systemctl restart reservoir-team
   sleep 3
   systemctl is-active reservoir-team && echo "  服务 active ✓" || { echo "  服务未启动"; journalctl -u reservoir-team -n 20 --no-pager; exit 1; }
+  echo "  启动时间: $(systemctl show reservoir-team -p ExecMainStartTimestamp --value)"
 '
 
 step "4) 本机回环健康检查（不经 nginx）"
@@ -64,6 +72,15 @@ step "4) 本机回环健康检查（不经 nginx）"
 step "5) 资源占用确认"
 "${SSH[@]}" 'systemctl show reservoir-team -p MemoryPeak -p MemoryCurrent 2>/dev/null | sed "s/^/  /"
   echo "  当前内存: $(free -h | awk "/Mem/{print \$7}") 可用"'
+
+step "5b) 确认线上代码是新版（join 必须返回 code_salt）"
+"${SSH[@]}" 'if grep -q "code_salt.*t\[.code_salt.\]" /opt/reservoir-team/coordinator.py; then
+    echo "  ✓ coordinator.py 含 salt 返回逻辑"
+  else
+    echo "  ✗ coordinator.py 仍是旧版！"; exit 1
+  fi
+  if [ -f /opt/reservoir-team/protocol.py ]; then echo "  ✓ protocol.py 已就位"; else echo "  ✗ protocol.py 缺失"; exit 1; fi
+'
 
 step "6) systemd 自启与重启策略确认"
 "${SSH[@]}" 'systemctl is-enabled reservoir-team | sed "s/^/  enabled: /"

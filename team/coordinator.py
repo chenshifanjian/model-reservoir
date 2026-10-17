@@ -18,6 +18,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
+import os
 import secrets
 import signal
 import sqlite3
@@ -31,10 +32,21 @@ from urllib.parse import urlparse
 # 端到端加密意味着密文在客户端加密、客户端解密，服务端只当中转信箱 ——
 # 这正是「阿里云永不见明文密钥」的保证（ruff F401 会一直提醒这件事，保留注释说明）。
 
-SCRYPT_N = 2 ** 15        # 实测 145ms/次 → 100 万种 6 位码全枚举 40 核·小时
-SCRYPT_R = 8
-SCRYPT_P = 1
-MAXMEM = 64 * 1024 * 1024
+# 密钥派生参数与客户端共用同一份实现，避免两边漂移
+# （protocol.py 与本文件一起部署到 /opt/reservoir-team/）
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+try:
+    from protocol import code_hash as _protocol_code_hash, SCRYPT_N, SCRYPT_R, SCRYPT_P, MAXMEM
+except ImportError:                      # 独立运行时兜底（如单文件拷走测试）
+    SCRYPT_N = 2 ** 15
+    SCRYPT_R = 8
+    SCRYPT_P = 1
+    MAXMEM = 64 * 1024 * 1024
+
+    def _protocol_code_hash(code: str, salt_hex: str) -> str:
+        return hashlib.scrypt(code.encode("utf-8"), salt=bytes.fromhex(salt_hex),
+                              n=SCRYPT_N, r=SCRYPT_R, p=SCRYPT_P,
+                              dklen=32, maxmem=MAXMEM).hex()
 
 CODE_TTL_DEFAULT = 7 * 86400      # 队伍默认 7 天，到期自动失效（配合防离线枚举）
 MAX_JOIN_ATTEMPTS = 5             # 每队每 IP 允许的错码次数
@@ -51,14 +63,9 @@ DB_LOCK = threading.Lock()
 _store: "Store | None" = None
 
 
-def scrypt_key(password: str, salt_hex: str) -> bytes:
-    """从队伍码派生密钥。服务端只用来校验 code_hash，从不解出可用密钥。"""
-    return hashlib.scrypt(
-        password.encode("utf-8"),
-        salt=bytes.fromhex(salt_hex),
-        n=SCRYPT_N, r=SCRYPT_R, p=SCRYPT_P,
-        dklen=32, maxmem=MAXMEM,
-    )
+def scrypt_key(password: str, salt_hex: str) -> str:
+    """入队码校验摘要。服务端只存这个，从不持有明文码 → 也派生不出队伍密钥。"""
+    return _protocol_code_hash(password, salt_hex)
 
 
 def hash_token(token: str) -> str:
@@ -456,7 +463,7 @@ class Handler(BaseHTTPRequestHandler):
 
             self.STORE().record_attempt(team_id, ip)
             # 145ms 的 scrypt 本身就是防枚举的一部分
-            if not hmac.compare_digest(scrypt_key(code, t["code_salt"]).hex(), t["code_hash"]):
+            if not hmac.compare_digest(scrypt_key(code, t["code_salt"]), t["code_hash"]):
                 _send(self, 403, {"ok": False, "error": "wrong_code"})
                 return
 
@@ -474,7 +481,10 @@ class Handler(BaseHTTPRequestHandler):
                 self.STORE().add_member(team_id, client_id, nickname, "member",
                                       "pending", hash_token(token))
                 existing = self.STORE().get_member(team_id, client_id)
+            # code_salt 必须返回：队员要用它 + code 派生 K_team。
+            # salt 不是秘密（服务端本来就存着），返回无害；秘密只有 code 本身。
             _send(self, 200, {"ok": True, "team_id": team_id, "token": token,
+                              "code_salt": t["code_salt"],
                               "status": existing["status"],
                               "members": self.STORE().list_members(team_id)})
             return

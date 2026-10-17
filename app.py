@@ -1208,9 +1208,12 @@ async def lifespan(app: FastAPI):
     )
     app.state.http = http_client
     poll_task = asyncio.create_task(poll_all())
+    team_poll_task = asyncio.create_task(_team_poll_loop())
     yield
     if poll_task:
         poll_task.cancel()
+    if team_poll_task:
+        team_poll_task.cancel()
     await http_client.aclose()
 
 
@@ -1391,6 +1394,226 @@ async def index(request: Request):
         "app_version": APP_VERSION,
     }
     return templates.TemplateResponse(request, "index.html", ctx)
+
+
+# ==== 组队（team）API ====
+# 客户端逻辑全在 team_client.py，这里只做 HTTP 转发 + 与本地 providers 联动。
+# 安全边界见 team_client.py 顶部注释：密钥一旦复制到队员机器就无法真正收回。
+import team_client as _tc
+
+team_state = _tc.TeamState(DATA_DIR)
+
+
+@app.get("/api/team/state")
+async def team_state_info(_=Depends(verify_admin)):
+    """本地组队状态概览（含每队成员、本地队伍来的 provider 统计）。"""
+    teams = []
+    for tid, t in team_state.list_teams().items():
+        remote = await _tc.fetch_team_state(team_state, tid)
+        teams.append({
+            "team_id": tid,
+            "role": t.get("role"),
+            "status": t.get("status", "active"),
+            "nickname": t.get("nickname", ""),
+            # 码只给队长自己看（队员也需要它派生密钥，但已经在本地）
+            "code": t.get("code", "") if t.get("role") == "captain" else "",
+            "code_hint": ("•" * 6) if t.get("role") != "captain" else t.get("code", ""),
+            "expires_at": t.get("expires_at"),
+            "alive": bool(remote.get("alive")) if remote.get("ok") else False,
+            "remote_status": remote.get("status"),
+            "members": remote.get("members", []),
+            "me": remote.get("me", {}),
+            "error": remote.get("error") if not remote.get("ok") else None,
+        })
+    summary = _tc.team_providers_summary(providers)
+    return {
+        "ok": True,
+        "client_id": team_state.client_id,
+        "server": team_state.server,
+        "teams": teams,
+        "team_providers": summary,
+    }
+
+
+@app.post("/api/team/create")
+async def team_create(data: dict, _=Depends(verify_admin)):
+    nickname = str(data.get("nickname") or "队长")[:32]
+    ttl = int(data.get("ttl") or 7 * 86400)
+    code_len = 8 if data.get("code_len") == 8 else 6
+    return await _tc.create_team(team_state, nickname, ttl, code_len)
+
+
+@app.post("/api/team/join")
+async def team_join(data: dict, _=Depends(verify_admin)):
+    team_id = str(data.get("team_id") or "").strip()
+    code = str(data.get("code") or "").strip()
+    nickname = str(data.get("nickname") or "队员")[:32]
+    if not team_id or not code:
+        return {"ok": False, "error": "队伍 ID 和组队码都不能为空"}
+    return await _tc.join_team(team_state, team_id, code, nickname)
+
+
+@app.post("/api/team/approve")
+async def team_approve(data: dict, _=Depends(verify_admin)):
+    return await _tc.approve_member(team_state, str(data.get("team_id") or ""),
+                                    str(data.get("client_id") or ""))
+
+
+@app.post("/api/team/kick")
+async def team_kick(data: dict, _=Depends(verify_admin)):
+    tid = str(data.get("team_id") or "")
+    cid = str(data.get("client_id") or "")
+    res = await _tc.kick_member(team_state, tid, cid)
+    return res
+
+
+@app.post("/api/team/nickname")
+async def team_nickname(data: dict, _=Depends(verify_admin)):
+    return await _tc.set_nickname(team_state, str(data.get("team_id") or ""),
+                                  str(data.get("nickname") or ""))
+
+
+@app.post("/api/team/leave")
+async def team_leave(data: dict, _=Depends(verify_admin)):
+    """本地离开队伍。队伍带来的 provider 会被置为失效（不删除，用户可自行删）。"""
+    tid = str(data.get("team_id") or "")
+    res = await _tc.leave_team(team_state, tid)
+    if res.get("ok"):
+        async with providers_lock:
+            providers[:] , n = _tc.mark_team_dead(providers, tid, "left")
+            save_providers(providers)
+        res["marked_dead"] = n
+    return res
+
+
+@app.post("/api/team/close")
+async def team_close(data: dict, _=Depends(verify_admin)):
+    tid = str(data.get("team_id") or "")
+    return await _tc.close_team(team_state, tid)
+
+
+@app.post("/api/team/sync")
+async def team_sync(data: dict, _=Depends(verify_admin)):
+    """队长把指定上游（含 api_key）加密推给指定队员。
+
+    这是**唯一的密钥外流通道**。界面上必须已警告过「不可收回」。
+    """
+    tid = str(data.get("team_id") or "")
+    cid = str(data.get("client_id") or "")
+    names = data.get("providers") or []
+    if isinstance(names, str):
+        names = [names]
+    t = team_state.get_team(tid)
+    if not t or t.get("role") != "captain":
+        return {"ok": False, "error": "只有队长能同步上游"}
+    if not cid:
+        return {"ok": False, "error": "未指定队员"}
+    by_name = {p.get("name"): p for p in providers}
+    results = []
+    for n in names:
+        p = by_name.get(n)
+        if not p:
+            results.append({"name": n, "ok": False, "error": "本地无此上游"})
+            continue
+        r = await _tc.sync_provider_to_member(team_state, tid, cid, p)
+        results.append({"name": n, "ok": bool(r.get("ok")), "error": r.get("error")})
+    ok = sum(1 for r in results if r.get("ok"))
+    return {"ok": ok > 0, "sent": ok, "total": len(names), "results": results,
+            "warning": "密钥已复制到对方机器，无法远程收回。撤销只能靠对方删除或你自己换 key。"}
+
+
+@app.post("/api/team/pull")
+async def team_pull(data: dict, _=Depends(verify_admin)):
+    """队员拉本队密文包并解密导入本地。关队/被踢的队伍会被置失效。"""
+    tid = str(data.get("team_id") or "")
+    tids = [tid] if tid else list(team_state.list_teams().keys())
+    imported, notes, dead_total = [], [], 0
+    for one in tids:
+        t = team_state.get_team(one)
+        if not t:
+            continue
+        # 先看队伍是否还活着，死了就把相关 provider 置失效
+        remote = await _tc.fetch_team_state(team_state, one)
+        if remote.get("ok"):
+            me_status = (remote.get("me") or {}).get("status")
+            if not remote.get("alive") or me_status == "kicked":
+                async with providers_lock:
+                    reason = "kicked" if me_status == "kicked" else "dissolved"
+                    providers[:], n = _tc.mark_team_dead(providers, one, reason)
+                    if n:
+                        save_providers(providers)
+                    dead_total += n
+                if me_status == "kicked":
+                    t["status"] = "kicked"
+                    team_state.put_team(one, t)
+                elif not remote.get("alive"):
+                    t["status"] = "closed"
+                    team_state.put_team(one, t)
+                continue
+            if me_status == "approved" and t.get("status") != "approved":
+                t["status"] = "approved"
+                team_state.put_team(one, t)
+
+        provs = await _tc.pull_packages(team_state, one)
+        if not provs:
+            continue
+        async with providers_lock:
+            for p in provs:
+                providers[:], added, note = _tc.merge_team_provider(
+                    providers, p, one, (t.get("nickname") or ""))
+                if added:
+                    notes.append(note)
+                    imported.append(p.get("name"))
+            if notes:
+                save_providers(providers)
+    return {"ok": True, "imported": imported, "notes": notes, "marked_dead": dead_total}
+
+
+@app.post("/api/team/report-usage")
+async def team_report_usage(_=Depends(verify_admin)):
+    return await _tc.report_usage(team_state, DATA_DIR)
+
+
+@app.get("/api/team/usage")
+async def team_usage(team_id: str, _=Depends(verify_admin)):
+    return await _tc.fetch_usage_stats(team_state, team_id)
+
+
+@app.get("/api/team/available-models")
+async def team_available_models(team_id: str, _=Depends(verify_admin)):
+    """队长视角：该队每个成员能拿到哪些上游（给「允许同步」开关用）。"""
+    t = team_state.get_team(team_id)
+    if not t or t.get("role") != "captain":
+        return {"ok": False, "error": "只有队长能看这个"}
+    remote = await _tc.fetch_team_state(team_state, team_id)
+    return {"ok": True, "members": remote.get("members", []),
+            "providers": [{"name": p.get("name"), "base_url": p.get("base_url"),
+                           "models": len(p.get("models") or []),
+                           "from_team": bool(p.get(_tc.TEAM_ORIGIN_KEY))}
+                          for p in providers]}
+
+
+@app.post("/api/team/set-server")
+async def team_set_server(data: dict, _=Depends(verify_admin)):
+    url = str(data.get("url") or "").strip().rstrip("/")
+    if not url.startswith(("http://", "https://")):
+        return {"ok": False, "error": "地址必须以 http:// 或 https:// 开头"}
+    team_state.set_server(url)
+    return {"ok": True, "server": team_state.server}
+
+
+# ---- 后台轮询：定时拉包、检测队伍状态、上报用量 ----
+async def _team_poll_loop():
+    """每 45 秒一轮：拉密文包（含置失效检测）+ 上报用量。失败静默，不影响主服务。"""
+    await asyncio.sleep(8)                      # 等主服务先起来
+    while True:
+        try:
+            if team_state.list_teams():
+                await _tc.pull_packages_on_all(team_state, providers, save_providers, providers_lock)
+                await _tc.report_usage(team_state, DATA_DIR)
+        except Exception:
+            logger.exception("team poll failed")
+        await asyncio.sleep(45)
 
 
 # ============================================================
