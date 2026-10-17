@@ -361,11 +361,18 @@ async def pull_packages_on_all(state: TeamState, providers: list, save_providers
         provs = await pull_packages(state, one)
         if not provs:
             continue
+        # 队长昵称从远端成员表里找（本地 t.nickname 是我自己的昵称，不是队长的）
+        captain_name = ""
+        if remote.get("ok"):
+            for m in remote.get("members", []):
+                if m.get("role") == "captain":
+                    captain_name = m.get("nickname") or ""
+                    break
         async with lock:
             changed = False
             for p in provs:
                 providers[:], added, _note = merge_team_provider(
-                    providers, p, one, t.get("nickname") or "")
+                    providers, p, one, captain_name)
                 if added:
                     imported.append(p.get("name"))
                     changed = True

@@ -917,6 +917,9 @@ td .sub-cell { font-size: 11px; color: var(--text-secondary); margin-top: 2px; }
 .free-free  { color: var(--success); background: color-mix(in srgb, var(--success) 12%, transparent); border-color: color-mix(in srgb, var(--success) 30%, transparent); }
 .free-paid  { color: var(--warning, #d97706); background: color-mix(in srgb, var(--warning, #d97706) 14%, transparent); border-color: color-mix(in srgb, var(--warning, #d97706) 32%, transparent); }
 .free-unknown { color: var(--text-secondary); background: color-mix(in srgb, var(--text-secondary) 10%, transparent); border-color: color-mix(in srgb, var(--text-secondary) 25%, transparent); }
+/* 队伍失效的上游：整卡降低存在感（不是禁用交互，只是视觉提示） */
+.provider-card[data-team-dead="1"] { opacity: 0.68; border-style: dashed; }
+.provider-card[data-team-dead="1"]:hover { opacity: 1; }
 /* 模态框内每行的价格徽章（更小一号，不抢模型名） */
 .mm-badge { font-size: 10px; padding: 1px 5px; border-radius: 4px; flex-shrink: 0; border: 1px solid transparent; cursor: help; }
 /* 免费筛选 chips */
@@ -983,6 +986,7 @@ td .sub-cell { font-size: 11px; color: var(--text-secondary); margin-top: 2px; }
       <button id="tab-providers" class="nav-tab" role="tab" aria-selected="false" onclick="switchMainTab('providers')">上游</button>
       <button id="tab-usage" class="nav-tab" role="tab" aria-selected="false" onclick="switchMainTab('usage')">用量</button>
       <button id="tab-logs" class="nav-tab" role="tab" aria-selected="false" onclick="switchMainTab('logs')">调用记录</button>
+      <button id="tab-team" class="nav-tab" role="tab" aria-selected="false" onclick="switchMainTab('team')">组队</button>
     </nav>
     <div class="toolbar-actions">
       <button class="btn btn-primary" onclick="checkAll()" id="checkAllBtn">
@@ -1171,6 +1175,65 @@ td .sub-cell { font-size: 11px; color: var(--text-secondary); margin-top: 2px; }
     </div>
 
     </section> <!-- end usage-view -->
+
+<!-- 组队页：临时队伍 + 上游同步（密钥一经同步无法远程收回） -->
+    <section id="team-view" class="app-view" hidden aria-label="组队">
+      <div class="page-head">
+        <div>
+          <h2 class="page-title">组队</h2>
+          <p class="page-sub">把你的上游分享给朋友用。同步即复制密钥，<strong>无法远程收回</strong>。</p>
+        </div>
+        <div style="display:flex; gap:8px; align-items:center; flex-wrap:wrap;">
+          <button class="btn" onclick="teamShowJoin()">加入队伍</button>
+          <button class="btn btn-primary" onclick="teamShowCreate()">创建队伍</button>
+        </div>
+      </div>
+
+      <!-- 协调服务器设置 -->
+      <div class="section-head" style="margin-top:0;">
+        <h3 class="section-title">协调服务器</h3>
+        <span class="section-hint">只负责发码/审批/成员表，不转发对话，也看不到你的密钥</span>
+      </div>
+      <div style="display:flex; gap:8px; align-items:center; flex-wrap:wrap; margin-bottom:18px;">
+        <input type="text" id="teamServerInput" placeholder="https://model-reservoir.heilongxiake.cn"
+               style="flex:1; min-width:260px; padding:7px 10px; border-radius:6px; border:1px solid var(--mac-border); background:transparent; color:var(--text-primary); font-size:13px; outline:none;">
+        <button class="btn" onclick="teamSaveServer()">保存</button>
+        <span class="section-hint" id="teamSelfId"></span>
+      </div>
+
+      <!-- 加入队伍表单（默认隐藏） -->
+      <div id="teamJoinBox" style="display:none; margin-bottom:18px; padding:14px; border:1px solid var(--mac-border); border-radius:10px;">
+        <div class="section-head" style="margin-top:0;"><h3 class="section-title">加入已有队伍</h3></div>
+        <div style="display:flex; gap:8px; flex-wrap:wrap; align-items:center;">
+          <input type="text" id="joinTeamId" placeholder="队伍 ID（队长给你的那串）" style="flex:2; min-width:200px; padding:7px 10px; border-radius:6px; border:1px solid var(--mac-border); background:transparent; color:var(--text-primary); font-size:13px; outline:none;">
+          <input type="text" id="joinCode" placeholder="6 位组队码" maxlength="8" style="flex:1; min-width:110px; padding:7px 10px; border-radius:6px; border:1px solid var(--mac-border); background:transparent; color:var(--text-primary); font-size:13px; outline:none; letter-spacing:2px;">
+          <input type="text" id="joinNick" placeholder="你的队内昵称" style="flex:1; min-width:110px; padding:7px 10px; border-radius:6px; border:1px solid var(--mac-border); background:transparent; color:var(--text-primary); font-size:13px; outline:none;">
+          <button class="btn btn-primary" onclick="teamJoinSubmit()">入队</button>
+        </div>
+        <div id="teamJoinMsg" style="font-size:12px; margin-top:8px; min-height:16px;"></div>
+      </div>
+
+      <!-- 创建队伍表单（默认隐藏） -->
+      <div id="teamCreateBox" style="display:none; margin-bottom:18px; padding:14px; border:1px solid var(--mac-border); border-radius:10px;">
+        <div class="section-head" style="margin-top:0;"><h3 class="section-title">创建新队伍</h3></div>
+        <div style="display:flex; gap:8px; flex-wrap:wrap; align-items:center;">
+          <input type="text" id="createNick" placeholder="你的队内昵称" value="队长" maxlength="32"
+                 style="flex:1; min-width:160px; padding:7px 10px; border-radius:6px; border:1px solid var(--mac-border); background:transparent; color:var(--text-primary); font-size:13px; outline:none;">
+          <select id="createTtl" style="padding:7px 8px; border-radius:6px; border:1px solid var(--mac-border); background:transparent; color:var(--text-primary); font-size:13px;">
+            <option value="86400">1 天</option>
+            <option value="259200">3 天</option>
+            <option value="604800" selected>7 天</option>
+            <option value="2592000">30 天</option>
+          </select>
+          <button class="btn btn-primary" onclick="teamCreate()">创建</button>
+          <button class="btn" onclick="document.getElementById('teamCreateBox').style.display='none'">取消</button>
+        </div>
+        <div style="font-size:11px; color:var(--text-secondary); margin-top:8px;">
+          队伍码在有效期结束或你手动关闭前有效。到期或关闭后码立即失效。</div>
+      </div>
+
+      <div id="teamList"><div class="empty">还没有队伍。点右上角「创建队伍」或「加入队伍」。</div></div>
+    </section>
 
     <section id="logs-view" class="app-view" hidden aria-label="调用记录">
       <div class="page-head">
@@ -1716,6 +1779,23 @@ function setMmPriceFilter(k) {
   filterModalModels();
 }
 
+// 队伍来源的上游：失效时优先显示来源，不显示免费标签。
+// 为什么：关队后模型会被全部禁用，免费统计只看启用中的 → 0 个 → 误判「仅免费」。
+// 用户此刻关心的是"这玩意儿废了"，不是"它免费"。
+function teamSourceBadge(p) {
+  const st = p && p.team_status;
+  if (!st || st === 'active') return '';
+  const label = { dissolved: '来自已解散队伍', kicked: '来自队伍（你已被移出）',
+                  left: '来自队伍（已离开）' }[st] || '来自队伍（已失效）';
+  const tid = ((p.team_origin || {}).team_id || '').slice(0, 8);
+  const captain = (p.team_origin || {}).captain || '';
+  const tip = '这个上游来自队伍 ' + tid + '…' +
+    (captain ? '（队长：' + captain + '）' : '') +
+    '\n队伍已失效，模型已全部禁用。记录保留着，你可以在上面的编辑里自行删除。' +
+    '\n如果还想用，需要自己去该上游重新申请 Key。';
+  return `<span class="mm-badge free-unknown" title="${tip.replace(/"/g, '&quot;')}">${label}</span>`;
+}
+
 function freeBadgeHTML(st) {
   if (!st) return '';
   let badge = st.badge || 'unknown';
@@ -1759,11 +1839,11 @@ async function load() {
     list.forEach(p => {
       providerOptionsHtml += `<option value="${p.name}">${p.name}</option>`;
       providersHtml += `
-        <div class="provider-card">
+        <div class="provider-card" data-team-dead="${(p.team_status && p.team_status !== 'active') ? '1' : '0'}">
           <div class="provider-head">
             <div style="display: flex; align-items: baseline; gap: 8px; min-width: 0;">
               <div class="p-name" style="margin-bottom: 0;">${p.name}</div>
-              <span class="provider-meta">${(p.models || []).length} 个模型${(p.disabled_models || []).length ? ' · ' + p.disabled_models.length + ' 个已禁用' : ''} ${freeBadgeHTML(p.free_status)}</span>
+              <span class="provider-meta">${(p.models || []).length} 个模型${(p.disabled_models || []).length ? ' · ' + p.disabled_models.length + ' 个已禁用' : ''} ${teamSourceBadge(p) || freeBadgeHTML(p.free_status)}</span>
             </div>
             <div style="display: flex; gap: 4px; flex-shrink: 0; align-items: center;">
               <button class="btn btn-icon btn-icon-sm" title="管理模型列表" aria-label="管理模型列表" onclick="openModelManager('${p.name}')">${ICON.list}</button>
@@ -2584,8 +2664,8 @@ document.addEventListener('visibilitychange', () => {
 /* 主导航：四页（监控 / 上游 / 用量 / 调用记录）。
    切换只改 hidden 属性和 .active 类，样式全部归 CSS——不再写内联 style，
    省得再出现"内联样式把 CSS 压过去"的老毛病，深浅色/悬停/焦点态也能统一管。 */
-const APP_PAGES = ['monitor', 'providers', 'usage', 'logs'];
-const PAGE_LOADERS = { usage: [() => loadUsage(), () => loadCallLog()], logs: [() => loadCallLog()] };
+const APP_PAGES = ['monitor', 'providers', 'usage', 'logs', 'team'];
+const PAGE_LOADERS = { usage: [() => loadUsage(), () => loadCallLog()], logs: [() => loadCallLog()], team: [() => teamLoad()] };
 let currentPage = 'monitor';
 
 function switchMainTab(tab) {
@@ -2603,6 +2683,458 @@ function switchMainTab(tab) {
   });
   (PAGE_LOADERS[tab] || []).forEach(function (fn) { fn(); });
   closeHeaderMenu();
+}
+
+/* ============ 组队（team）页 ============ */
+let TEAM_STATE = null;
+// 两步确认的状态位（每个危险操作各一个，避免互相干扰）
+let teamConfirmPushArmed = null, teamConfirmCloseArmed = null;
+let teamConfirmKickArmed = null, teamConfirmLeaveArmed = null;
+let teamSyncOpen = null;      // 当前展开同步面板的 team_id
+let teamPendingSync = null;   // 待推送的 {team_id, client_id}
+
+function escHtml(s) {
+  return String(s == null ? '' : s).replace(/[&<>"']/g, c => ({
+    '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
+  }[c]));
+}
+
+// 所有拼进 innerHTML 的动态文本都必须过 escHtml/escTeam（含服务端返回的 error）
+function escHtml(s) {
+  return String(s == null ? '' : s).replace(/[&<>"']/g, c => ({
+    '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
+  }[c]));
+}
+
+// 所有拼进 innerHTML 的动态文本都必须过 escHtml/escTeam（含服务端返回的 error）
+function teamMsg(el, text, isErr) {
+  const e = document.getElementById(el);
+  if (!e) return;
+  e.innerHTML = '<span style="color:' + (isErr ? 'var(--danger)' : 'var(--success)') + '">' + escHtml(text) + '</span>';
+}
+
+// 两步确认：替代 confirm()。WebKitGTK 里 confirm()/prompt() 会阻塞 JS 线程甚至不弹，
+// 实测会把整个页面卡死（CDP Runtime.evaluate 超时）。这里用非模态状态机：
+// 第一次点 → 按钮变红「再点一次确认」；3 秒内再点 → 真正执行；超时自动恢复。
+const _teamArmed = {};
+function teamConfirm(btn, key, onYes) {
+  if (_teamArmed[key]) {
+    clearTimeout(_teamArmed[key]);
+    delete _teamArmed[key];
+    onYes();
+    return;
+  }
+  const orig = btn.innerText, origStyle = btn.style.cssText;
+  btn.innerText = '再点一次确认';
+  btn.style.color = 'var(--danger)';
+  btn.style.borderColor = 'var(--danger)';
+  _teamArmed[key] = setTimeout(() => {
+    delete _teamArmed[key];
+    btn.innerText = orig;
+    btn.style.cssText = origStyle;
+  }, 3000);
+}
+
+function escTeam(s) {
+  return String(s == null ? '' : s).replace(/[&<>"']/g, c => ({
+    '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
+  }[c]));
+}
+
+function teamFmtTs(ts) {
+  if (!ts) return '—';
+  const d = new Date(ts * 1000);
+  return d.getMonth() + 1 + '-' + d.getDate() + ' ' +
+    String(d.getHours()).padStart(2, '0') + ':' + String(d.getMinutes()).padStart(2, '0');
+}
+
+async function teamLoad() {
+  try {
+    const r = await apiFetch('/api/team/state');
+    TEAM_STATE = await r.json();
+    document.getElementById('teamServerInput').value = TEAM_STATE.server || '';
+    document.getElementById('teamSelfId').innerText =
+      '本机 ID ' + String(TEAM_STATE.client_id || '').slice(0, 8) + '…';
+    renderTeams();
+  } catch (e) {
+    if (e.message === 'Unauthorized') return;
+    console.error(e);
+    document.getElementById('teamList').innerHTML =
+      '<div class="empty" style="color:var(--danger)">加载组队状态失败</div>';
+  }
+}
+
+function renderTeams() {
+  const box = document.getElementById('teamList');
+  const teams = (TEAM_STATE && TEAM_STATE.teams) || [];
+  if (!teams.length) {
+    box.innerHTML = '<div class="empty">还没有队伍。点右上角「创建队伍」或「加入队伍」。</div>';
+    return;
+  }
+  const dead = (TEAM_STATE.team_providers || {}).dead || 0;
+  let html = '';
+  if (dead > 0) {
+    html += `<div style="margin-bottom:12px; padding:10px 12px; border-radius:8px; font-size:12px;
+      background:color-mix(in srgb, var(--warning,#d97706) 12%, transparent);
+      border:1px solid color-mix(in srgb, var(--warning,#d97706) 32%, transparent);">
+      有 <strong>${escTeam(Number(dead))}</strong> 个来自已解散队伍的上游已置灰（模型全部禁用）。可在「上游」页自行删除。</div>`;
+  }
+  teams.forEach(t => html += teamCard(t));
+  box.innerHTML = html;
+  // DOM 就绪后再加载同步面板的上游列表（依赖 syncProvList 元素已存在）
+  if (teamSyncOpen) teamLoadSyncProviders();
+}
+
+function teamStatusBadge(t) {
+  if (!t.alive) return '<span class="free-badge free-unknown">已解散</span>';
+  if (t.status === 'kicked') return '<span class="free-badge free-paid">已被移出</span>';
+  if (t.status === 'closed') return '<span class="free-badge free-unknown">已关闭</span>';
+  if (t.role === 'captain') return '<span class="free-badge free-free">队长</span>';
+  if (t.me && t.me.status === 'pending') return '<span class="free-badge free-unknown">待审批</span>';
+  return '<span class="free-badge free-free">队员</span>';
+}
+
+function teamCard(t) {
+  const isCaptain = t.role === 'captain';
+  const members = t.members || [];
+  const pending = members.filter(m => m.status === 'pending');
+  const joined = members.filter(m => m.status !== 'pending');
+
+  let codeBlock = '';
+  if (isCaptain && t.alive) {
+    codeBlock = `
+      <div style="margin:12px 0; padding:12px; border-radius:8px; text-align:center;
+                  background:color-mix(in srgb, var(--accent-primary) 10%, transparent);
+                  border:1px solid color-mix(in srgb, var(--accent-primary) 28%, transparent);">
+        <div style="font-size:11px; color:var(--text-secondary); margin-bottom:6px;">组队码（让朋友输这个）</div>
+        <div style="font-size:26px; letter-spacing:6px; font-weight:600; font-family:monospace;">${escTeam(t.code)}</div>
+        <div style="font-size:11px; color:var(--text-secondary); margin-top:6px;">
+          队伍 ID <code style="font-size:11px;">${escTeam(t.team_id)}</code>
+          <button class="btn" style="padding:2px 8px; font-size:11px; margin-left:6px;"
+                  onclick="navigator.clipboard && navigator.clipboard.writeText('${escTeam(t.team_id)}')">复制 ID</button>
+          <button class="btn" style="padding:2px 8px; font-size:11px;"
+                  onclick="navigator.clipboard && navigator.clipboard.writeText('${escTeam(t.code)}')">复制码</button>
+        </div>
+      </div>`;
+  } else if (!isCaptain) {
+    codeBlock = `<div style="font-size:12px; color:var(--text-secondary); margin:10px 0;">
+        队伍 ID <code>${escTeam(t.team_id)}</code> · 昵称「${escTeam(t.nickname)}」</div>`;
+  }
+
+  let membersHtml = '';
+  if (pending.length && isCaptain && t.alive) {
+    membersHtml += `<div style="margin-bottom:8px;"><div style="font-size:12px; color:var(--text-secondary); margin-bottom:4px;">待审批 ${pending.length} 人</div>` +
+      pending.map(m => `<div style="display:flex; align-items:center; gap:8px; padding:6px 0; font-size:13px;">
+        <span style="flex:1;">${escTeam(m.nickname)} <span style="color:var(--text-secondary); font-size:11px;">(${escTeam(String(m.client_id).slice(0, 8))}…)</span></span>
+        <button class="btn btn-primary" style="padding:3px 10px; font-size:12px;" onclick="teamApprove('${escTeam(t.team_id)}','${escTeam(m.client_id)}')">批准</button>
+      </div>`).join('') + '</div>';
+  }
+  if (joined.length) {
+    membersHtml += `<div style="font-size:12px; color:var(--text-secondary); margin:8px 0 4px;">成员 ${joined.length} 人</div>` +
+      joined.map(m => {
+        const roleTxt = m.role === 'captain' ? '队长' : (m.status === 'kicked' ? '已移出' : '队员');
+        const kickBtn = (isCaptain && t.alive && m.role !== 'captain' && m.status !== 'kicked')
+          ? `<button class="btn" style="padding:2px 8px; font-size:11px; color:var(--danger);"
+                     onclick="teamKick('${escTeam(t.team_id)}','${escTeam(m.client_id)}')">移出</button>` : '';
+        return `<div style="display:flex; align-items:center; gap:8px; padding:5px 0; font-size:13px; border-bottom:1px solid var(--mac-border);">
+          <span style="flex:1;">${escTeam(m.nickname)} <span style="color:var(--text-secondary); font-size:11px;">${roleTxt}</span></span>
+          ${kickBtn}</div>`;
+      }).join('');
+  }
+
+  // 队长：同步面板
+  let syncHtml = '';
+  if (isCaptain && t.alive && joined.filter(m => m.role !== 'captain').length) {
+    if (teamSyncOpen === t.team_id) {
+      syncHtml = `<div style="margin-top:12px; padding:12px; border:1px solid var(--mac-border); border-radius:8px;">
+        <div style="font-size:12px; color:var(--text-secondary); margin-bottom:6px;">
+          选一个队员，再勾要给他的上游：</div>
+        <select id="syncMemberSel" style="padding:6px 8px; border-radius:6px; border:1px solid var(--mac-border); background:transparent; color:var(--text-primary); margin-bottom:10px;">
+          ${joined.filter(m => m.role !== 'captain' && m.status === 'approved')
+            .map(m => `<option value="${escTeam(m.client_id)}">${escTeam(m.nickname)}</option>`).join('')}
+        </select>
+        <div id="syncProvList" style="max-height:220px; overflow:auto; margin-bottom:10px;">加载上游中…</div>
+        <div style="display:flex; gap:8px; align-items:center; flex-wrap:wrap;">
+          <button class="btn btn-primary" onclick="teamSyncPush('${escTeam(t.team_id)}')">推送给该队员</button>
+          <button class="btn" onclick="teamSyncOpen=null; renderTeams();">收起</button>
+          <span class="section-hint" id="syncMsg"></span>
+        </div>
+        <div style="margin-top:8px; font-size:11px; color:var(--danger);">
+          ⚠ 一旦推送，密钥就复制到对方机器上了，我这边无法远程收回。只能让对方删除，或你自己去上游换 key。</div>
+      </div>`;
+      // 注意：这里不能调 teamLoadSyncProviders() —— 此时 box.innerHTML
+      // 还没赋值，syncProvList 元素不存在，函数会直接 return。
+      // 改为在 renderTeams 末尾（innerHTML 赋值后）再加载。
+    } else {
+      syncHtml = `<div style="margin-top:10px;">
+        <button class="btn" onclick="teamSyncOpen='${escTeam(t.team_id)}'; renderTeams();">同步上游给队员…</button></div>`;
+    }
+  }
+
+  const actions = [];
+  if (isCaptain && t.alive) actions.push(`<button class="btn" style="color:var(--danger);" onclick="teamClose('${escTeam(t.team_id)}')">关闭队伍</button>`);
+  actions.push(`<button class="btn" onclick="teamPull('${escTeam(t.team_id)}')">拉取上游</button>`);
+  actions.push(`<button class="btn" onclick="teamRename('${escTeam(t.team_id)}', '${escTeam(t.nickname)}')">改昵称</button>`);
+  actions.push(`<button class="btn" onclick="teamLeave('${escTeam(t.team_id)}')">离开</button>`);
+
+  const usageBtn = (isCaptain && joined.filter(m => m.role !== 'captain').length)
+    ? `<button class="btn" onclick="teamShowUsage('${escTeam(t.team_id)}')">队员用量</button>` : '';
+
+  return `<div style="padding:14px; border:1px solid var(--mac-border); border-radius:10px; margin-bottom:12px;">
+    <div style="display:flex; align-items:center; gap:10px; flex-wrap:wrap;">
+      <strong style="font-size:14px;">队伍 ${escTeam(t.team_id.slice(0, 8))}…</strong>
+      ${teamStatusBadge(t)}
+      <span class="section-hint">有效期至 ${teamFmtTs(t.expires_at)}</span>
+      <span style="flex:1;"></span>
+    </div>
+    ${codeBlock}
+    ${membersHtml}
+    ${syncHtml}
+    <div id="teamUsage-${escTeam(t.team_id)}"></div>
+    <div style="display:flex; gap:8px; margin-top:12px; flex-wrap:wrap;">${actions.join('')}${usageBtn}</div>
+  </div>`;
+}
+
+async function teamSaveServer() {
+  const url = document.getElementById('teamServerInput').value.trim();
+  try {
+    const r = await apiFetch('/api/team/set-server', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ url }),
+    });
+    const d = await r.json();
+    showToast(d.ok ? '服务器地址已保存' : (escHtml(d.error) || '保存失败'), d.ok ? 'ok' : 'error');
+    if (d.ok) teamLoad();
+  } catch (e) { if (e.message !== 'Unauthorized') console.error(e); }
+}
+
+function teamShowJoin() {
+  const b = document.getElementById('teamJoinBox');
+  b.style.display = b.style.display === 'none' ? 'block' : 'none';
+}
+
+async function teamJoinSubmit() {
+  const teamId = document.getElementById('joinTeamId').value.trim();
+  const code = document.getElementById('joinCode').value.trim();
+  const nick = document.getElementById('joinNick').value.trim() || '队员';
+  if (!teamId || !code) { teamMsg('teamJoinMsg', '队伍 ID 和组队码都不能为空', true); return; }
+  teamMsg('teamJoinMsg', '提交中…', false);
+  try {
+    const r = await apiFetch('/api/team/join', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ team_id: teamId, code, nickname: nick }),
+    });
+    const d = await r.json();
+    if (!d.ok) { teamMsg('teamJoinMsg', d.error || '入队失败', true); return; }
+    teamMsg('teamJoinMsg', d.status === 'approved' ? '已入队！' : '已提交，等队长批准…', false);
+    document.getElementById('joinCode').value = '';
+    await teamLoad();
+  } catch (e) { if (e.message !== 'Unauthorized') teamMsg('teamJoinMsg', '请求失败', true); }
+}
+
+function teamShowCreate() {
+  const b = document.getElementById('teamCreateBox');
+  b.style.display = b.style.display === 'none' ? 'block' : 'none';
+  if (b.style.display === 'block') document.getElementById('createNick').focus();
+}
+
+async function teamCreate() {
+  // 不用 prompt()：模态阻塞，在 WebKitGTK 里可能根本不弹，会卡死 JS 线程
+  const nick = (document.getElementById('createNick').value || '').trim() || '队长';
+  const ttl = parseInt(document.getElementById('createTtl').value, 10) || 604800;
+  try {
+    const r = await apiFetch('/api/team/create', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ nickname: nick, ttl: ttl }),
+    });
+    const d = await r.json();
+    if (!d.ok) { showToast(escHtml(d.error) || '建队失败', 'error'); return; }
+    showToast('队伍已创建！把队伍 ID 和组队码发给朋友', 'ok');
+    document.getElementById('teamCreateBox').style.display = 'none';
+    await teamLoad();
+  } catch (e) { if (e.message !== 'Unauthorized') console.error(e); }
+}
+
+async function teamRename(teamId, cur) {
+  const box = document.getElementById('teamUsage-' + teamId);
+  if (!box) return;
+  if (box.innerHTML) { box.innerHTML = ''; return; }
+  box.innerHTML = `<div style="margin-top:10px; padding:10px; border:1px solid var(--mac-border); border-radius:8px;">
+    <div style="font-size:12px; color:var(--text-secondary); margin-bottom:6px;">改队内昵称</div>
+    <div style="display:flex; gap:8px; align-items:center;">
+      <input type="text" id="renameInput-${escTeam(teamId)}" value="${escTeam(cur)}" maxlength="32"
+             style="flex:1; padding:6px 10px; border-radius:6px; border:1px solid var(--mac-border); background:transparent; color:var(--text-primary); font-size:13px; outline:none;">
+      <button class="btn btn-primary" onclick="teamRenameSubmit('${escTeam(teamId)}')">保存</button>
+    </div></div>`;
+}
+
+async function teamRenameSubmit(teamId) {
+  const inp = document.getElementById('renameInput-' + teamId);
+  const nick = (inp && inp.value || '').trim();
+  if (!nick) return;
+  try {
+    const r = await apiFetch('/api/team/nickname', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ team_id: teamId, nickname: nick }),
+    });
+    const d = await r.json();
+    showToast(d.ok ? '昵称已更新' : (escHtml(d.error) || '更新失败'), d.ok ? 'ok' : 'error');
+    await teamLoad();
+  } catch (e) { if (e.message !== 'Unauthorized') console.error(e); }
+}
+
+async function teamApprove(teamId, cid) {
+  try {
+    const r = await apiFetch('/api/team/approve', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ team_id: teamId, client_id: cid }),
+    });
+    const d = await r.json();
+    showToast(d.ok ? '已批准' : (escHtml(d.error) || '批准失败'), d.ok ? 'ok' : 'error');
+    await teamLoad();
+  } catch (e) { if (e.message !== 'Unauthorized') console.error(e); }
+}
+
+async function teamKick(teamId, cid) {
+  const _kbtn = event && event.target;
+  if (_kbtn && !teamConfirmKickArmed) {
+    teamConfirmKickArmed = setTimeout(() => { teamConfirmKickArmed = null; }, 3000);
+    if (_kbtn) { _kbtn.innerText = '再点一次确认'; _kbtn.style.color = 'var(--danger)'; }
+    return;
+  }
+  if (teamConfirmKickArmed) { clearTimeout(teamConfirmKickArmed); teamConfirmKickArmed = null; }
+  try {
+    const r = await apiFetch('/api/team/kick', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ team_id: teamId, client_id: cid }),
+    });
+    const d = await r.json();
+    showToast(d.ok ? '已移出' : (escHtml(d.error) || '操作失败'), d.ok ? 'ok' : 'error');
+    await teamLoad();
+  } catch (e) { if (e.message !== 'Unauthorized') console.error(e); }
+}
+
+async function teamClose(teamId) {
+  const _cbtn = event && event.target;
+  if (_cbtn && !teamConfirmCloseArmed) {
+    teamConfirmCloseArmed = setTimeout(() => { teamConfirmCloseArmed = null; }, 3000);
+    if (_cbtn) { _cbtn.innerText = '再点一次确认关闭'; _cbtn.style.color = 'var(--danger)'; }
+    return;
+  }
+  if (teamConfirmCloseArmed) { clearTimeout(teamConfirmCloseArmed); teamConfirmCloseArmed = null; }
+  try {
+    const r = await apiFetch('/api/team/close', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ team_id: teamId }),
+    });
+    const d = await r.json();
+    showToast(d.ok ? '队伍已关闭' : (escHtml(d.error) || '关闭失败'), d.ok ? 'ok' : 'error');
+    await teamLoad();
+  } catch (e) { if (e.message !== 'Unauthorized') console.error(e); }
+}
+
+async function teamLeave(teamId) {
+  const _lbtn = event && event.target;
+  if (_lbtn && !teamConfirmLeaveArmed) {
+    teamConfirmLeaveArmed = setTimeout(() => { teamConfirmLeaveArmed = null; }, 3000);
+    if (_lbtn) { _lbtn.innerText = '再点一次确认离开'; _lbtn.style.color = 'var(--danger)'; }
+    return;
+  }
+  if (teamConfirmLeaveArmed) { clearTimeout(teamConfirmLeaveArmed); teamConfirmLeaveArmed = null; }
+  try {
+    const r = await apiFetch('/api/team/leave', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ team_id: teamId }),
+    });
+    const d = await r.json();
+    showToast(d.ok ? '已离开' : (escHtml(d.error) || '操作失败'), d.ok ? 'ok' : 'error');
+    await teamLoad();
+  } catch (e) { if (e.message !== 'Unauthorized') console.error(e); }
+}
+
+async function teamPull(teamId) {
+  try {
+    const r = await apiFetch('/api/team/pull', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ team_id: teamId }),
+    });
+    const d = await r.json();
+    const n = (d.imported || []).length;
+    showToast(n ? `导入 ${n} 个上游：${escHtml((d.notes || []).join('、'))}` : '没有新的上游可拉', n ? 'ok' : 'info');
+    await teamLoad();
+  } catch (e) { if (e.message !== 'Unauthorized') console.error(e); }
+}
+
+async function teamLoadSyncProviders() {
+  const box = document.getElementById('syncProvList');
+  if (!box) return;
+  const tid = teamSyncOpen;
+  try {
+    const r = await apiFetch('/api/team/available-models?team_id=' + encodeURIComponent(tid));
+    const d = await r.json();
+    if (!d.ok) { box.innerHTML = '<div class="empty">加载失败</div>'; return; }
+    const provs = (d.providers || []).filter(p => !p.from_team);
+    if (!provs.length) { box.innerHTML = '<div class="empty">没有可同步的上游</div>'; return; }
+    box.innerHTML = provs.map(p => `
+      <label style="display:flex; align-items:center; gap:8px; padding:4px 0; font-size:13px; cursor:pointer;">
+        <input type="checkbox" class="sync-prov-cb" value="${escTeam(p.name)}">
+        <span style="flex:1;">${escTeam(p.name)}</span>
+        <span class="section-hint">${escTeam(Number(p.models || 0))} 个模型</span>
+      </label>`).join('');
+  } catch (e) { box.innerHTML = '<div class="empty">加载失败</div>'; }
+}
+
+async function teamSyncPush(teamId) {
+  const sel = document.getElementById('syncMemberSel');
+  const cid = sel && sel.value;
+  const names = [...document.querySelectorAll('.sync-prov-cb:checked')].map(c => c.value);
+  if (!cid) { teamMsg('syncMsg', '先选一个队员', true); return; }
+  if (!names.length) { teamMsg('syncMsg', '至少勾一个上游', true); return; }
+  // 两步确认：先把按钮文字换成提示，再点一次才真推
+  const _btn = event && event.target;
+  if (_btn && !teamConfirmPushArmed) {
+    teamConfirmPushArmed = setTimeout(() => { teamConfirmPushArmed = null; }, 3000);
+    if (_btn) { _btn.innerText = '再点一次确认（密钥不可收回）'; _btn.style.color = 'var(--danger)'; }
+    teamMsg('syncMsg', `将复制 ${names.length} 个上游（含 API Key）给该队员，无法远程收回。再点一次确认。`, true);
+    return;
+  }
+  if (teamConfirmPushArmed) { clearTimeout(teamConfirmPushArmed); teamConfirmPushArmed = null; }
+  try {
+    const r = await apiFetch('/api/team/sync', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ team_id: teamId, client_id: cid, providers: names }),
+    });
+    const d = await r.json();
+    teamMsg('syncMsg', d.ok ? `已推送 ${d.sent}/${d.total} 个` : (d.error || '推送失败'), !d.ok);
+    if (d.ok) { teamSyncOpen = null; renderTeams(); }
+  } catch (e) { if (e.message !== 'Unauthorized') teamMsg('syncMsg', '请求失败', true); }
+}
+
+async function teamShowUsage(teamId) {
+  const box = document.getElementById('teamUsage-' + teamId);
+  if (!box) return;
+  if (box.innerHTML) { box.innerHTML = ''; return; }
+  box.innerHTML = '<div class="empty">加载用量…</div>';
+  try {
+    const r = await apiFetch('/api/team/usage?team_id=' + encodeURIComponent(teamId));
+    const d = await r.json();
+    if (!d.ok) { box.innerHTML = `<div class="empty" style="color:var(--danger)">${escTeam(d.error || '加载失败')}</div>`; return; }
+    const by = d.by_member || [];
+    if (!by.length) { box.innerHTML = '<div class="empty">还没有队员上报用量</div>'; return; }
+    const names = {};
+    ((TEAM_STATE.teams || []).find(t => t.team_id === teamId) || {}).members
+      .forEach(m => { names[m.client_id] = m.nickname; });
+    box.innerHTML = `<div style="margin-top:10px; padding:10px; border:1px solid var(--mac-border); border-radius:8px;">
+      <div style="font-size:12px; color:var(--text-secondary); margin-bottom:6px;">队员用量（只读统计）</div>
+      <table style="width:100%; font-size:13px; border-collapse:collapse;">
+        <tr style="color:var(--text-secondary); text-align:left;">
+          <th style="padding:3px 0;">成员</th><th>调用</th><th>输入</th><th>输出</th><th>合计</th></tr>
+        ${by.map(u => `<tr style="border-top:1px solid var(--mac-border);">
+          <td style="padding:4px 0;">${escTeam(names[u.client_id] || String(u.client_id).slice(0, 8) + '…')}</td>
+          <td>${escTeam(Number(u.calls || 0))}</td><td>${escTeam(Number(u.pt || 0))}</td>
+          <td>${escTeam(Number(u.ct || 0))}</td><td>${escTeam(Number(u.tt || 0))}</td></tr>`).join('')}
+      </table></div>`;
+  } catch (e) { box.innerHTML = '<div class="empty">加载失败</div>'; }
 }
 
 /* ============ 路由配置 ============ */

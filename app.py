@@ -1557,10 +1557,17 @@ async def team_pull(data: dict, _=Depends(verify_admin)):
         provs = await _tc.pull_packages(team_state, one)
         if not provs:
             continue
+        # 队长昵称从远端成员表取（本地 t.nickname 是我自己的昵称）
+        captain_name = ""
+        if remote.get("ok"):
+            for m in remote.get("members", []):
+                if m.get("role") == "captain":
+                    captain_name = m.get("nickname") or ""
+                    break
         async with providers_lock:
             for p in provs:
                 providers[:], added, note = _tc.merge_team_provider(
-                    providers, p, one, (t.get("nickname") or ""))
+                    providers, p, one, captain_name)
                 if added:
                     notes.append(note)
                     imported.append(p.get("name"))
@@ -2211,6 +2218,9 @@ async def list_providers(_=Depends(verify_admin)):
             "disabled_models": p.get("disabled_models", []),
             "free_only": p.get("free_only", True),
             "free_status": summarize_provider_free(p, oracle),
+            # 组队来源标记：前端用它显示「来自已解散队伍」并置灰
+            "team_origin": p.get("team_origin"),
+            "team_status": p.get("team_status"),
             "health": {},
         }
         for m in p.get("models", []):
