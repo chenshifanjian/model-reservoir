@@ -1072,3 +1072,88 @@ def test_price_cache_corrupt_file_is_safe(tmp_path, monkeypatch):
     (tmp_path / "pricing_cache.json").write_text("{oops", encoding="utf-8")
     got = app_module._read_price_cache()
     assert got["tail"] == {} and got["fetched_at"] == 0.0
+
+
+# ============================================================
+# 模型管理弹窗：available-models 每模型免费判定（2026-10-17）
+# ============================================================
+def test_available_models_returns_per_model_verdict(monkeypatch):
+    """弹窗接口要给每个模型一份判定，不是只给名字列表。"""
+    class _Resp:
+        status_code = 200
+
+        def json(self):
+            return {"data": [
+                {"id": "m-free", "pricing": {"prompt": "0", "completion": "0"}},
+                {"id": "deepseek-chat"},
+                {"id": "brand-new-model"},
+            ]}
+
+    class _Client:
+        async def get(self, *a, **k):
+            return _Resp()
+
+    monkeypatch.setattr(app_module, "http_client", _Client())
+    monkeypatch.setattr(app_module, "providers", [_prov(["m-free"])])
+    monkeypatch.setattr(app_module, "save_providers", lambda *a, **k: None)
+    # 价目源命中 deepseek-chat
+    monkeypatch.setattr(app_module, "_read_price_cache",
+                        lambda: {"tail": {"deepseek-chat": [2.7e-6, 1.1e-5]}, "fetched_at": 1.0, "source": "openrouter"})
+
+    import asyncio
+    res = asyncio.run(app_module.get_available_models("P"))
+    assert res["ok"] is True
+    assert res["models"] == ["m-free", "deepseek-chat", "brand-new-model"]
+    free = res["free"]
+    assert free["m-free"]["status"] == "free" and free["m-free"]["source"] == "upstream"
+    assert free["deepseek-chat"]["status"] == "paid" and free["deepseek-chat"]["source"] == "oracle"
+    assert free["brand-new-model"]["status"] == "unknown"
+
+
+def test_available_models_persists_upstream_pricing(monkeypatch):
+    """上游给了 pricing 就存进 provider，下次判定不用重拉。"""
+    class _Resp:
+        status_code = 200
+
+        def json(self):
+            return {"data": [{"id": "a", "pricing": {"prompt": "0", "completion": "0"}}]}
+
+    class _Client:
+        async def get(self, *a, **k):
+            return _Resp()
+
+    saved = {}
+    monkeypatch.setattr(app_module, "http_client", _Client())
+    p = _prov(["a"])
+    monkeypatch.setattr(app_module, "providers", [p])
+    monkeypatch.setattr(app_module, "save_providers", lambda provs: saved.setdefault("called", True))
+    import asyncio
+    asyncio.run(app_module.get_available_models("P"))
+    assert p["model_pricing"]["a"]["prompt"] == "0"
+    assert saved.get("called") is True
+
+
+def test_available_models_404_for_unknown_provider(monkeypatch):
+    from fastapi import HTTPException
+    monkeypatch.setattr(app_module, "providers", [])
+    import asyncio
+    with pytest.raises(HTTPException):
+        asyncio.run(app_module.get_available_models("不存在的"))
+
+
+def test_available_models_empty_upstream(monkeypatch):
+    class _Resp:
+        status_code = 200
+
+        def json(self):
+            return {"data": []}
+
+    class _Client:
+        async def get(self, *a, **k):
+            return _Resp()
+
+    monkeypatch.setattr(app_module, "http_client", _Client())
+    monkeypatch.setattr(app_module, "providers", [_prov([])])
+    import asyncio
+    res = asyncio.run(app_module.get_available_models("P"))
+    assert res["models"] == [] and res["free"] == {}

@@ -917,6 +917,13 @@ td .sub-cell { font-size: 11px; color: var(--text-secondary); margin-top: 2px; }
 .free-free  { color: var(--success); background: color-mix(in srgb, var(--success) 12%, transparent); border-color: color-mix(in srgb, var(--success) 30%, transparent); }
 .free-paid  { color: var(--warning, #d97706); background: color-mix(in srgb, var(--warning, #d97706) 14%, transparent); border-color: color-mix(in srgb, var(--warning, #d97706) 32%, transparent); }
 .free-unknown { color: var(--text-secondary); background: color-mix(in srgb, var(--text-secondary) 10%, transparent); border-color: color-mix(in srgb, var(--text-secondary) 25%, transparent); }
+/* 模态框内每行的价格徽章（更小一号，不抢模型名） */
+.mm-badge { font-size: 10px; padding: 1px 5px; border-radius: 4px; flex-shrink: 0; border: 1px solid transparent; cursor: help; }
+/* 免费筛选 chips */
+.mm-chip { font-size: 12px; padding: 3px 10px; border-radius: 999px; cursor: pointer; white-space: nowrap;
+  border: 1px solid var(--mac-border, var(--border)); background: transparent; color: var(--text-secondary); }
+.mm-chip:hover { border-color: var(--accent-primary); color: var(--text-primary); }
+.mm-chip.on { background: var(--accent-primary); border-color: var(--accent-primary); color: #fff; }
 /* poll-bar 里的竖线分隔：浅色主题下白线看不见，改跟边框同色 */
 .sep { display: inline-block; width: 1px; height: 12px; background: var(--mac-border); margin: 0 8px; vertical-align: -1px; }
 @media (max-width: 900px) {
@@ -1341,9 +1348,10 @@ td .sub-cell { font-size: 11px; color: var(--text-secondary); margin-top: 2px; }
     </div>
     <div class="modal-body">
       <div style="margin-bottom: 12px; display: flex; gap: 8px; justify-content: space-between; align-items: center;">
-        <div style="display: flex; gap: 8px;">
+        <div style="display: flex; gap: 8px; align-items: center; flex-wrap: wrap;">
           <button class="btn" onclick="selectAllModels(true)">全选</button>
           <button class="btn" onclick="selectAllModels(false)">取消全选</button>
+          <span id="mmPriceChips" style="display: none; gap: 5px; margin-left: 6px; flex-wrap: wrap;"></span>
         </div>
         <input type="text" id="modalSearchInput" placeholder="搜索模型..." oninput="filterModalModels()" style="padding: 6px 10px; border-radius: 6px; border: 1px solid var(--mac-border); background: transparent; color: var(--text-primary); font-size: 13px; width: 200px; outline: none; box-shadow: inset 0 1px 2px rgba(0,0,0,0.05);">
       </div>
@@ -1681,6 +1689,32 @@ const _svg = p => '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" s
 const FREE_BADGE_LABEL = { free: '仅免费', paid: '含付费', unknown: '未核实' };
 const FREE_SOURCE_LABEL = { upstream: '上游自报价目', name: '免费后缀', local: '本机/内网', oracle: '公开价目源' };
 let PRICE_SOURCE = null;   // /api/price-source 的元信息，进 tooltip 说明依据新鲜度
+
+let mmFreeMap = {};      // 模型管理弹窗：模型名 → 判定结果（后端给的）
+let mmPriceFilter = 'all';   // 'all' | 'free' | 'paid' | 'unknown'
+
+// 单个模型的价格徽章：只写结论，依据放 title 里
+function mmBadgeHTML(v) {
+  const st = (v || {}).status || 'unknown';
+  const label = { free: '免费', paid: '付费', unknown: '未核实' }[st];
+  const src = { upstream: '上游自报 pricing', name: '模型名免费后缀', local: '本机/内网', oracle: '公开价目源', none: '无证据' }[(v || {}).source] || '';
+  const price = (v || {}).price;
+  let tip = st === 'free' ? '判定为免费（' + src + '）' : st === 'paid' ? '判定为付费（' + src + '）' : '没有可靠证据判定价格，不猜';
+  if (price && (v || {}).source === 'oracle') {
+    tip += '\n价目源标价：$' + (price[0] * 1e6).toFixed(2) + ' / $' + (price[1] * 1e6).toFixed(2) + ' 每百万 token（不同厂商实际结算价可能不同）';
+  }
+  if ((v || {}).conflict) tip += '\n⚠ 上游自报价目与公开价目源不一致';
+  return `<span class="mm-badge free-${st}" title="${tip.replace(/"/g, '&quot;')}">${label}</span>`;
+}
+
+// 筛选 chips 点击
+function setMmPriceFilter(k) {
+  mmPriceFilter = k;
+  document.querySelectorAll('#mmPriceChips .mm-chip').forEach(c => {
+    c.classList.toggle('on', c.getAttribute('data-mm-filter') === k);
+  });
+  filterModalModels();
+}
 
 function freeBadgeHTML(st) {
   if (!st) return '';
@@ -2052,8 +2086,11 @@ let currentManagingProvider = null;
 
 async function openModelManager(provider) {
   currentManagingProvider = provider;
+  mmPriceFilter = 'all';
   document.getElementById('modalTitle').innerText = `${provider} - 模型管理`;
   document.getElementById('modalSearchInput').value = '';
+  document.getElementById('mmPriceChips').style.display = 'none';
+  document.getElementById('mmPriceChips').innerHTML = '';
   document.getElementById('modalModelList').innerHTML = '<div class="empty">正在获取远端可用模型列表...<br><br><svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="animation: spin 1s linear infinite"><line x1="12" y1="2" x2="12" y2="6"></line><line x1="12" y1="18" x2="12" y2="22"></line><line x1="4.93" y1="4.93" x2="7.76" y2="7.76"></line><line x1="16.24" y1="16.24" x2="19.07" y2="19.07"></line><line x1="2" y1="12" x2="6" y2="12"></line><line x1="18" y1="12" x2="22" y2="12"></line><line x1="4.93" y1="19.07" x2="7.76" y2="16.24"></line><line x1="16.24" y1="7.76" x2="19.07" y2="4.93"></line></svg></div>';
   document.getElementById('modalStatusText').innerText = '';
   document.getElementById('modelModal').classList.add('show');
@@ -2064,7 +2101,7 @@ async function openModelManager(provider) {
     const pData = pList.find(p => p.name === provider);
     const currentModels = new Set(pData ? (pData.models || []) : []);
 
-    const rAvailable = await apiFetch(`/api/providers/${provider}/available-models`);
+    const rAvailable = await apiFetch(`/api/providers/${encodeURIComponent(provider)}/available-models`);
     const availableData = await rAvailable.json();
     if (!availableData.ok) throw new Error("API返回错误");
 
@@ -2073,8 +2110,23 @@ async function openModelManager(provider) {
       document.getElementById('modalModelList').innerHTML = '<div class="empty">该供应商未返回任何可用模型。</div>';
       return;
     }
+    // 免费判定：后端按证据分级给的，缺了就当未核实（不降级回"免费"）
+    mmFreeMap = availableData.free || {};
     currentModels.forEach(m => { if (!allModels.includes(m)) allModels.push(m); });
     allModels.sort();
+
+    // 统计三类数量，渲染筛选 chips
+    let nFree = 0, nPaid = 0, nUnknown = 0;
+    allModels.forEach(m => {
+      const s = (mmFreeMap[m] || {}).status || 'unknown';
+      if (s === 'free') nFree++; else if (s === 'paid') nPaid++; else nUnknown++;
+    });
+    const chips = document.getElementById('mmPriceChips');
+    chips.innerHTML = [
+      ['all', `全部 ${allModels.length}`], ['free', `免费 ${nFree}`],
+      ['paid', `付费 ${nPaid}`], ['unknown', `未核实 ${nUnknown}`],
+    ].map(([k, label]) => `<button class="mm-chip${k === 'all' ? ' on' : ''}" data-mm-filter="${k}" onclick="setMmPriceFilter('${k}')">${label}</button>`).join('');
+    chips.style.display = 'flex';
 
     let html = '';
     allModels.forEach(m => {
@@ -2083,10 +2135,12 @@ async function openModelManager(provider) {
         <label class="model-checkbox-item">
           <input type="checkbox" class="modal-model-checkbox" value="${m}" ${isChecked}>
           <div class="model-checkbox-label">${m}</div>
+          ${mmBadgeHTML(mmFreeMap[m])}
         </label>`;
     });
     document.getElementById('modalModelList').innerHTML = html;
-    document.getElementById('modalStatusText').innerText = `共加载了 ${allModels.length} 个模型`;
+    document.getElementById('modalStatusText').innerText =
+      `共 ${allModels.length} 个模型 · 免费 ${nFree} / 付费 ${nPaid} / 未核实 ${nUnknown}`;
   } catch (e) {
     if (e.message === 'Unauthorized') return;
     console.error(e);
@@ -2100,10 +2154,20 @@ function closeModelManager() {
 }
 
 function filterModalModels() {
-  const query = document.getElementById('modalSearchInput').value.toLowerCase();
+  // 搜索框 + 免费筛选 chips 同时生效；搜索框里直接写 免费/付费/未核实 也能筛
+  const raw = document.getElementById('modalSearchInput').value.trim();
+  const query = raw.toLowerCase();
+  const TEXT2KEY = { '免费': 'free', 'free': 'free', '付费': 'paid', '收费': 'paid', 'paid': 'paid', '未核实': 'unknown', 'unknown': 'unknown' };
+  const textKey = TEXT2KEY[raw] || TEXT2KEY[query] || null;
+  const key = textKey || mmPriceFilter;
   document.querySelectorAll('#modalModelList .model-checkbox-item').forEach(item => {
     const label = item.querySelector('.model-checkbox-label').innerText.toLowerCase();
-    item.style.display = label.includes(query) ? 'flex' : 'none';
+    const badgeEl = item.querySelector('.mm-badge');
+    const st = badgeEl ? (badgeEl.classList.contains('free-free') ? 'free'
+      : badgeEl.classList.contains('free-paid') ? 'paid' : 'unknown') : 'unknown';
+    const hitText = (textKey || !query) ? (textKey ? true : label.includes(query)) : label.includes(query);
+    const hitPrice = (key === 'all') || (key === st);
+    item.style.display = (hitText && hitPrice) ? 'flex' : 'none';
   });
 }
 

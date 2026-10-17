@@ -2191,12 +2191,41 @@ async def refresh_models(name: str, _=Depends(verify_admin)):
 
 @app.get("/api/providers/{name}/available-models")
 async def get_available_models(name: str, _=Depends(verify_admin)):
-
+    """上游全量模型列表 + 每个模型的免费判定（模型管理弹窗用）。"""
+    target = None
     for p in providers:
         if p["name"] == name:
-            models = await fetch_models(p["base_url"], p["api_key"], free_only=False)
-            return {"ok": True, "models": models}
-    raise HTTPException(404, "未找到")
+            target = p
+            break
+    if target is None:
+        raise HTTPException(404, "未找到")
+
+    models, fresh_pricing = await fetch_models_with_pricing(
+        target["base_url"], target["api_key"], free_only=False
+    )
+    if not models:
+        return {"ok": True, "models": [], "free": {}}
+
+    # 顺手把上游自报价目存下来（这是 E1 级最权威证据，下次不用重拉也能判）
+    stored = dict(target.get("model_pricing") or {})
+    if fresh_pricing:
+        stored.update(fresh_pricing)
+        if stored != (target.get("model_pricing") or {}):
+            async with providers_lock:
+                target["model_pricing"] = stored
+                save_providers(providers)
+
+    oracle = await get_price_oracle()
+    free_map = {
+        m: classify_model_free(
+            m,
+            upstream_pricing=stored.get(m),
+            base_url=target["base_url"],
+            oracle=oracle,
+        )
+        for m in models
+    }
+    return {"ok": True, "models": models, "free": free_map}
 
 
 @app.put("/api/providers/{name}")
