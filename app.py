@@ -1498,7 +1498,10 @@ async def team_state_info(_=Depends(verify_admin)):
 @app.post("/api/team/create")
 async def team_create(data: dict, _=Depends(verify_admin)):
     nickname = str(data.get("nickname") or "队长")[:32]
-    ttl = int(data.get("ttl") or 7 * 86400)
+    # 不能写成 `data.get("ttl") or 7*86400`：ttl=0 是「永久」的合法取值，
+    # 而 0 是 falsy，会被当成没传从而落回默认 7 天 —— 永久队伍建不出来。
+    raw_ttl = data.get("ttl")
+    ttl = 7 * 86400 if raw_ttl is None else int(raw_ttl)
     code_len = 8 if data.get("code_len") == 8 else 6
     return await _tc.create_team(team_state, nickname, ttl, code_len)
 
@@ -1580,6 +1583,53 @@ async def team_sync(data: dict, _=Depends(verify_admin)):
     ok = sum(1 for r in results if r.get("ok"))
     return {"ok": ok > 0, "sent": ok, "total": len(names), "results": results,
             "warning": "密钥已复制到对方机器，无法远程收回。撤销只能靠对方删除或你自己换 key。"}
+
+
+@app.get("/api/team/sync-allow")
+async def team_sync_allow_get(_=Depends(verify_admin)):
+    """白名单：哪些本地上游允许同步给全队。
+
+    **默认全开** —— 用户定的口径是「默认都是同步的，只有队长显式关掉
+    才不同步」。没写到的平台一律视为允许。
+    """
+    out = {}
+    for tid in team_state.list_teams():
+        t = team_state.get_team(tid)
+        if t and t.get("role") == "captain":
+            out[tid] = t.get("sync_allow") or {}
+    return {"ok": True, "allow": out,
+            "providers": [{"name": p.get("name"),
+                           "from_team": bool(_tc._provider_team_id(p))}
+                          for p in providers]}
+
+
+@app.post("/api/team/sync-allow")
+async def team_sync_allow_set(data: dict, _=Depends(verify_admin)):
+    """队长改白名单。只有队长能改 —— 这是密钥外流的闸门。"""
+    tid = str(data.get("team_id") or "")
+    allow = data.get("allow") or {}
+    t = team_state.get_team(tid)
+    if not t or t.get("role") != "captain":
+        return {"ok": False, "error": "只有队长能调整同步范围"}
+    if not isinstance(allow, dict):
+        return {"ok": False, "error": "allow 必须是对象"}
+    t["sync_allow"] = {str(k): bool(v) for k, v in allow.items()}
+    team_state.put_team(tid, t)
+    off = [k for k, v in t["sync_allow"].items() if not v]
+    return {"ok": True, "allow": t["sync_allow"], "disabled": off,
+            "warning": ("密钥一旦同步就是复制到对方机器，无法远程收回；"
+                        "关掉只是不再推新的，已经推过去的收不回来。") if off else ""}
+
+
+@app.post("/api/team/rotate-code")
+async def team_rotate_code(data: dict, _=Depends(verify_admin)):
+    """轮换入队码。永久队伍尤其需要：码泄漏等于永久开放。"""
+    tid = str(data.get("team_id") or "")
+    code_len = 8 if data.get("code_len") == 8 else 6
+    t = team_state.get_team(tid)
+    if not t or t.get("role") != "captain":
+        return {"ok": False, "error": "只有队长能轮换组队码"}
+    return await _tc.rotate_code(team_state, tid, code_len)
 
 
 @app.post("/api/team/pull")
@@ -2484,6 +2534,7 @@ async def apply_preset(data: PresetApplyIn, _=Depends(verify_admin)):
             existing_names = {p["name"] for p in providers}
             for plat_name, plat_cfg in platforms.items():
                 key = (keys.get(plat_name) or "").strip()
+                coexist = False            # key 不同要并存：旧条目保留，新条目加后缀
                 # needs_key=False 的平台（Ollama / LM Studio 这类本机推理）压根没有
                 # Key 输入框，keys 里自然不存在它。若沿用下面的老逻辑，会一律落到
                 # 「未填写 Key」被跳过 —— 卡片摆在那却永远配不上，正是无效控件。
@@ -2491,18 +2542,29 @@ async def apply_preset(data: PresetApplyIn, _=Depends(verify_admin)):
                 # 本机推理服务是正确的，转发时 header 就是 Bearer 空值）。
                 no_key_needed = plat_cfg.get("needs_key") is False
 
-                # 默认不动已配置的平台。留空 Key 老逻辑会拿旧 Key 重建条目
-                # （重置 free_only、模型禁用状态等手调设置），团队场景下这是
-                # 回退而非保留。要动必须显式勾选覆盖。
-                if plat_name in existing_names and not overwrite:
-                    existing = next((p for p in providers if p["name"] == plat_name), None)
-                    team_src = (existing or {}).get("team_origin")
-                    results[plat_name] = {
-                        "ok": True,
-                        "detail": (f"已配置，本次跳过（来自队伍 {team_src}）" if team_src
-                                   else "已配置，本次跳过"),
-                    }
-                    continue
+                # 已配置的平台怎么处理，分三种情况：
+                #   没填 Key / 填了相同的 Key 且没勾「重新拉取」→ 跳过
+                #   填了**不同的 Key** → 新增一条并存，旧的原封不动
+                #   勾了「重新拉取」且 Key 相同 → 刷新（重置 free_only 等，属预期）
+                # 最后一种是唯一会动旧条目的情形。
+                existing = next((p for p in providers if p["name"] == plat_name), None)
+                if existing is not None:
+                    team_src = existing.get("team_origin")
+                    same_key = (existing.get("api_key") or "") == key
+                    if key and not same_key:
+                        # key 不同 → 并存。团队 14 人各自注册免费账号，
+                        # 覆盖等于把别人的额度顶掉，正好违背组队初衷。
+                        same_key = False
+                    elif not overwrite:
+                        results[plat_name] = {
+                            "ok": True,
+                            "detail": (f"已配置，本次跳过（来自队伍 {team_src}）"
+                                       if team_src else "已配置，本次跳过"),
+                        }
+                        continue
+                    # 走到这里要么是「key 不同要并存」，要么是「勾了重新拉取」。
+                    # 并存时**不删旧条目**，改用带后缀的新名字。
+                    coexist = key and not same_key
 
                 if not key and not no_key_needed:
                     if plat_name in existing_names:
@@ -2519,9 +2581,19 @@ async def apply_preset(data: PresetApplyIn, _=Depends(verify_admin)):
                 if not vr["ok"]:
                     results[plat_name] = {"ok": False, "detail": vr["detail"]}
                     continue
+                final_name = plat_name
                 if plat_name in existing_names:
-                    providers[:] = [p for p in providers if p["name"] != plat_name]
-                    existing_names.discard(plat_name)
+                    if coexist:
+                        # 并存：旧条目原封不动，新条目换个名字。
+                        # 用户口径是「同一个上游只要 key 不一样就不要覆盖，
+                        # 当作不同的上游供应商看待」。
+                        k = 2
+                        while f"{plat_name}-{k}" in existing_names:
+                            k += 1
+                        final_name = f"{plat_name}-{k}"
+                    else:
+                        providers[:] = [p for p in providers if p["name"] != plat_name]
+                        existing_names.discard(plat_name)
                 fetched, pricing = await fetch_models_with_pricing(
                     plat_cfg["base_url"], key, plat_cfg.get("free_only", True)
                 )
@@ -2536,7 +2608,7 @@ async def apply_preset(data: PresetApplyIn, _=Depends(verify_admin)):
                     models = fetched
                     disabled = []
                 providers.append({
-                    "name": plat_name,
+                    "name": final_name,
                     "base_url": plat_cfg["base_url"],
                     "api_key": key,
                     "models": models,
@@ -2544,9 +2616,12 @@ async def apply_preset(data: PresetApplyIn, _=Depends(verify_admin)):
                     "free_only": plat_cfg.get("free_only", True),
                     **({"model_pricing": pricing} if pricing else {}),
                 })
-                existing_names.add(plat_name)
-                created_names.append(plat_name)
-                results[plat_name] = {"ok": True, "detail": f"已配置 {len(models)} 个模型"}
+                existing_names.add(final_name)
+                created_names.append(final_name)
+                results[plat_name] = {
+                    "ok": True,
+                    "detail": (f"已新增为「{final_name}」（Key 不同，旧的保留）"
+                               if coexist else f"已配置 {len(models)} 个模型")}
             save_providers(providers)
             preset_routers = preset.get("routers", {})
             for gname, members in preset_routers.items():

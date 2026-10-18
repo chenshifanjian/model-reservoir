@@ -25,6 +25,7 @@ from pathlib import Path
 # （冻结环境里没有 team/ 子目录，且动态路径 PyInstaller 追踪不到）。
 from protocol import (                       # noqa: E402
     code_hash, derive_team_key, encrypt_for_member, decrypt_as_member,
+    encrypt_broadcast, decrypt_broadcast,
 )
 
 TEAM_FILE_NAME = "team.json"
@@ -125,6 +126,14 @@ async def _req(state: TeamState, method: str, path: str, body: dict | None = Non
 # ============================================================
 # 队长侧
 # ============================================================
+def gen_code(code_len: int = 8) -> str:
+    """生成入队码。6 位数字是低安全档，8 位大熵码才是默认。"""
+    if code_len == 6:
+        return "%06d" % (secrets.randbelow(900000) + 100000)
+    alphabet = "23456789ABCDEFGHJKLMNPQRSTUVWXYZ"   # 去掉易混的 0/O/1/I
+    return "".join(secrets.choice(alphabet) for _ in range(8))
+
+
 async def create_team(state: TeamState, nickname: str = "队长", ttl: int = 7 * 86400,
                       code_len: int = 8) -> dict:
     """建队。返回 {team_id, code, ...}。码只在本机明文持有，服务端只见摘要。
@@ -134,11 +143,7 @@ async def create_team(state: TeamState, nickname: str = "队长", ttl: int = 7 *
     租几十个 vCPU 几十分钟就能解出全部成员的密钥 —— 协议的核心威胁模型被击穿。
     8 位 32 字母表约 2^40，同量级算力要几十年。6 位只作为低安全档保留。
     """
-    if code_len == 6:
-        code = "%06d" % (secrets.randbelow(900000) + 100000)
-    else:                                   # 8 位大熵码
-        alphabet = "23456789ABCDEFGHJKLMNPQRSTUVWXYZ"   # 去掉易混的 0/O/1/I
-        code = "".join(secrets.choice(alphabet) for _ in range(8))
+    code = gen_code(code_len)
     salt = secrets.token_hex(32)
     d = await _req(state, "POST", "/api/teams", {
         "captain_client_id": state.client_id,
@@ -209,6 +214,30 @@ async def sync_provider_to_member(state: TeamState, team_id: str,
 # ============================================================
 # 队员侧
 # ============================================================
+async def rotate_code(state: TeamState, team_id: str, code_len: int = 8) -> dict:
+    """轮换入队码。永久队伍尤其需要 —— 码一旦泄漏就是永久开放。
+
+    注意：换码会换掉 K_team（它由 code 派生），所以**换码后**
+    队里已有的密文包全体失效，成员需要重新拉取。已在机器上的上游
+    不受影响（密钥已经落地），但之后的新贡献要用新码才能互解。
+    """
+    t = state.get_team(team_id)
+    if not t or t.get("role") != "captain":
+        return {"ok": False, "error": "只有队长能轮换组队码"}
+    code = gen_code(code_len)
+    salt = secrets.token_hex(32)
+    d = await _req(state, "POST", f"/api/teams/{team_id}/rotate-code",
+                   {"code_hash": code_hash(code, salt), "code_salt": salt},
+                   token=t["token"])
+    if not d.get("ok"):
+        return d
+    t["code"] = code
+    t["code_salt"] = salt
+    state.put_team(team_id, t)
+    return {"ok": True, "code": code, "code_len": code_len,
+            "warning": "换码后旧码立即失效；已在队员机器上的密钥收不回来。"}
+
+
 async def join_team(state: TeamState, team_id: str, code: str, nickname: str = "队员") -> dict:
     d = await _req(state, "POST", "/api/teams/join", {
         "code": code, "team_id": team_id,
@@ -255,16 +284,27 @@ async def pull_packages(state: TeamState, team_id: str) -> list[dict]:
     out = []
     team_key = derive_team_key(t["code"], team_id, t["code_salt"])
     for p in d.get("packages", []):
+        raw = None
         try:
-            raw = decrypt_as_member(team_key, state.client_id,
+            # 先试广播通道（K_team，全队可见）——共享池里绝大多数包是这种
+            raw = decrypt_broadcast(team_key,
                                     bytes.fromhex(p["nonce"]), bytes.fromhex(p["payload"]))
-            prov = json.loads(raw.decode("utf-8"))
-            if isinstance(prov, dict):
-                prov.setdefault("name", p.get("provider_name", "来自队伍的上游"))
-                out.append(prov)
         except Exception:
-            # 解不开通常是 code 已换（队长 rotate 过）或非本人的包
+            try:
+                # 再试定向通道（K_member）——队长单独发给我的
+                raw = decrypt_as_member(team_key, state.client_id,
+                                        bytes.fromhex(p["nonce"]), bytes.fromhex(p["payload"]))
+            except Exception:
+                # 解不开通常是 code 已换（队长 rotate 过）或不是给我的包
+                continue
+        try:
+            prov = json.loads(raw.decode("utf-8"))
+        except Exception:
             continue
+        if isinstance(prov, dict):
+            prov.setdefault("name", p.get("provider_name", "来自队伍的上游"))
+            prov["_contributor"] = p.get("contributor_client_id") or ""
+            out.append(prov)
     return out
 
 
@@ -291,7 +331,8 @@ def mark_team_dead(providers: list, team_id: str, reason: str = "dissolved") -> 
 
 
 def merge_team_provider(providers: list, incoming: dict, team_id: str,
-                        captain_name: str = "") -> tuple[list, bool, str]:
+                        captain_name: str = "",
+                        contributor: str = "") -> tuple[list, bool, str]:
     """把解密来的 provider 并入本地列表。返回 (列表, 是否新增/更新, 说明)。
 
     - 重名不同源 → 加后缀，避免覆盖用户自己的同名上游
@@ -306,11 +347,15 @@ def merge_team_provider(providers: list, incoming: dict, team_id: str,
     }
     incoming[TEAM_STATUS_KEY] = "active"
 
-    # 同队同名 → 更新
+    # 同队同名：只有 key 也相同才算「同一条的更新」（队长改了设置重新推送）。
+    # key 不同说明是**另一个账号**，必须并存 —— 团队里每人各自注册免费账号，
+    # 同名不同 key 若覆盖，等于把别人的额度顶掉，正好违背组队的初衷。
     for i, p in enumerate(providers):
         if _provider_team_id(p) == team_id and p.get("name") == name:
-            providers[i] = incoming
-            return providers, True, f"更新「{name}」"
+            if (p.get("api_key") or "") == key:
+                providers[i] = incoming
+                return providers, True, f"更新「{name}」"
+            break   # 名字冲突但 key 不同 → 落到下面的加后缀分支并存
 
     # 同 base_url+key（不管来源）→ 认为同一个
     for i, p in enumerate(providers):
@@ -320,10 +365,13 @@ def merge_team_provider(providers: list, incoming: dict, team_id: str,
             providers[i] = incoming
             return providers, True, f"更新已有上游「{incoming['name']}」"
 
-    # 与本地自有上游重名 → 加后缀
+    # 与本地自有上游重名，或同队同名但 key 不同 → 加后缀并存。
+    # 后缀优先用**贡献者**：共享池里 14 个人各贡献一条同名上游，
+    # 只写「队伍」根本分不清谁是谁。
     existing_names = {p.get("name") for p in providers}
     if name in existing_names:
-        suffix = f"·队伍-{(captain_name or team_id)[:8]}"
+        who = contributor or captain_name or team_id
+        suffix = f"·{who[:8]}"
         new_name, k = name, 1
         while new_name in existing_names:
             new_name = f"{name}{suffix}{'' if k == 1 else k}"
@@ -352,6 +400,52 @@ def team_providers_summary(providers: list) -> dict:
         if st != "active":
             dead += 1
     return {"by_team": by_team, "dead": dead}
+
+
+def _contributable(providers: list, team_id: str) -> list[dict]:
+    """挑出该广播给全队的本地自有上游。
+
+    - 来自队伍的不回传（否则队里会无限回声，同一条上游被反复转发）
+    - 已经被队长关掉同步的平台不传（白名单，opt-out）
+    """
+    out = []
+    for p in providers:
+        if _provider_team_id(p):
+            continue                     # 来自队伍的，不回传
+        out.append(p)
+    return out
+
+
+async def push_contributions(state: TeamState, providers: list,
+                             allow: dict | None = None) -> list[str]:
+    """把自己本地自有的上游广播给全队。返回本次上传的名字列表。
+
+    白名单 `allow` 是 {平台名: bool}，**默认全开**（用户定的：
+    默认都是同步的，只有队长显式关掉才不同步）。白名单不过的绝不能
+    进广播通道 —— 广播意味着全队可见。
+    """
+    allow = allow or {}
+    t = None
+    uploaded = []
+    for team_id in list(state.list_teams().keys()):
+        t = state.get_team(team_id)
+        if not t or t.get("status") != "approved" or not t.get("code_salt"):
+            continue
+        team_key = derive_team_key(t["code"], team_id, t["code_salt"])
+        for p in _contributable(providers, team_id):
+            name = p.get("name") or ""
+            if allow.get(name, True) is False:
+                continue
+            blob = {k: v for k, v in p.items() if not k.startswith("team_")}
+            nonce, ct = encrypt_broadcast(
+                team_key, json.dumps(blob, ensure_ascii=False).encode("utf-8"))
+            d = await _req(state, "POST", f"/api/teams/{team_id}/packages",
+                           body={"provider_name": name, "target_client_id": "",
+                                 "nonce": nonce.hex(), "payload": ct.hex()},
+                           token=t["token"])
+            if d.get("ok"):
+                uploaded.append(name)
+    return uploaded
 
 
 async def pull_packages_on_all(state: TeamState, providers: list, save_providers,
@@ -383,6 +477,12 @@ async def pull_packages_on_all(state: TeamState, providers: list, save_providers
             if me_status == "approved" and t.get("status") != "approved":
                 t["status"] = "approved"
                 state.put_team(one, t)
+        # 先把自己的贡献推上去（共享池：双向）。失败不影响后续拉取。
+        try:
+            allow = t.get("sync_allow") or {}
+            await push_contributions(state, providers, allow)
+        except Exception:
+            pass
         provs = await pull_packages(state, one)
         if not provs:
             continue
@@ -397,7 +497,8 @@ async def pull_packages_on_all(state: TeamState, providers: list, save_providers
             changed = False
             for p in provs:
                 providers[:], added, _note = merge_team_provider(
-                    providers, p, one, captain_name)
+                    providers, p, one, captain_name,
+                    contributor=p.pop("_contributor", ""))
                 if added:
                     imported.append(p.get("name"))
                     changed = True

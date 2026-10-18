@@ -155,3 +155,49 @@ def test_preset_skip_names_team_origin(monkeypatch):
     res = r.json()["results"]
     assert "工程队" in res["OpenRouter"]["detail"], res["OpenRouter"]
     A.providers.clear()
+
+
+def test_preset_new_key_coexists_instead_of_overwriting(monkeypatch):
+    """同一个平台填了不同的 Key → 新增一条并存，旧的原封不动
+
+    用户口径：「哪怕是一个上游提供商，只要是 api key 不一样就不要覆盖」。
+    团队里每人各自注册免费账号，覆盖等于把别人的额度顶掉。
+    """
+    import app as A
+    from fastapi.testclient import TestClient
+
+    async def _fake_load(_force=False):
+        return {"platforms": {
+            "Groq": {"base_url": "https://api.groq.com/openai/v1",
+                     "needs_key": True, "free_only": False, "models": []},
+        }}
+
+    async def _fake_verify(base_url, key):
+        return {"ok": True, "detail": "连接成功"}
+
+    async def _fake_fetch(base_url, key, free_only):
+        return ["m-" + key[-4:]], {}
+    monkeypatch.setattr(A, "load_preset", _fake_load)
+    monkeypatch.setattr(A, "verify_provider_key_impl", _fake_verify)
+    monkeypatch.setattr(A, "fetch_models_with_pricing", _fake_fetch)
+
+    A.providers.clear()
+    A.providers.append({"name": "Groq", "base_url": "https://api.groq.com/openai/v1",
+                        "api_key": "sk-aaaa", "models": ["m-aaaa"], "free_only": False})
+
+    client = TestClient(A.app)
+    h = {"Authorization": "Bearer " + A.LOCAL_API_KEY}
+    r = client.post("/api/providers/preset",
+                    json={"keys": {"Groq": "sk-bbbb"}}, headers=h)
+    res = r.json()["results"]
+
+    assert len(A.providers) == 2, [p["name"] for p in A.providers]
+    keys = sorted(p["api_key"] for p in A.providers)
+    assert keys == ["sk-aaaa", "sk-bbbb"], keys
+    # 旧条目连名字都没被动过
+    assert any(p["name"] == "Groq" and p["api_key"] == "sk-aaaa" for p in A.providers)
+    # 新条目带后缀
+    assert any(p["name"] != "Groq" and p["api_key"] == "sk-bbbb" for p in A.providers)
+    detail = res["Groq"]["detail"]
+    assert ("并存" in detail) or ("新增" in detail), detail
+    A.providers.clear()

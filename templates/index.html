@@ -1236,13 +1236,17 @@ td .sub-cell { font-size: 11px; color: var(--text-secondary); margin-top: 2px; }
         <div style="display:flex; gap:8px; flex-wrap:wrap; align-items:center;">
           <input type="text" id="createNick" placeholder="你的队内昵称" value="队长" maxlength="32"
                  style="flex:1; min-width:160px; padding:7px 10px; border-radius:6px; border:1px solid var(--mac-border); background:transparent; color:var(--text-primary); font-size:13px; outline:none;">
-          <select id="createTtl" style="padding:7px 8px; border-radius:6px; border:1px solid var(--mac-border); background:transparent; color:var(--text-primary); font-size:13px;">
+          <select id="createTtl" onchange="updateTtlHint()" style="padding:7px 8px; border-radius:6px; border:1px solid var(--mac-border); background:transparent; color:var(--text-primary); font-size:13px;">
             <option value="86400">1 天</option>
             <option value="259200">3 天</option>
             <option value="604800" selected>7 天</option>
             <option value="2592000">30 天</option>
+            <option value="0">永久</option>
           </select>
           <button class="btn btn-primary" onclick="teamCreate()">创建</button>
+        </div>
+        <div id="ttlHint" style="font-size:12px; color:var(--text-secondary); margin-top:8px;"></div>
+        <div style="display:flex; gap:8px; flex-wrap:wrap; align-items:center;">
           <button class="btn" onclick="document.getElementById('teamCreateBox').style.display='none'">取消</button>
         </div>
         <div style="font-size:11px; color:var(--text-secondary); margin-top:8px;">
@@ -3002,10 +3006,26 @@ function teamShowCreate() {
   if (b.style.display === 'block') document.getElementById('createNick').focus();
 }
 
+function updateTtlHint() {
+  const el = document.getElementById('ttlHint');
+  if (!el) return;
+  const v = document.getElementById('createTtl').value;
+  if (v === '0') {
+    el.innerHTML = '<b style="color:var(--warning,#d97706)">永久队伍不自动过期。</b>'
+      + '入队码会一直有效，一旦泄漏就是永久开放 —— 队长可以在队里随时'
+      + '<b>轮换组队码</b>作废旧码，或直接关队。';
+  } else {
+    el.textContent = '到期自动失效，之后入队码不可用（已同步的上游不受影响）。';
+  }
+}
+
 async function teamCreate() {
   // 不用 prompt()：模态阻塞，在 WebKitGTK 里可能根本不弹，会卡死 JS 线程
   const nick = (document.getElementById('createNick').value || '').trim() || '队长';
-  const ttl = parseInt(document.getElementById('createTtl').value, 10) || 604800;
+  // 不能写 `parseInt(...) || 604800`：ttl=0 是「永久」的合法取值，
+  // 而 0 是 falsy，会被当成没选从而落回 7 天 —— 永久队伍点不出来。
+  const rawTtl = document.getElementById('createTtl').value;
+  const ttl = rawTtl === '' ? 604800 : parseInt(rawTtl, 10);
   try {
     const r = await apiFetch('/api/team/create', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
@@ -3459,12 +3479,13 @@ function renderPresetCards(preset) {
   // 团队里每人各自注册免费账号、各自手调 free_only 与模型禁用状态，
   // 重建条目会把这些改动抹掉。要动必须显式勾选。
   let html = '<div class="preset-intro preset-notice">'
-           + '默认只新增没配过的平台，<b>已配置的原样不动</b>；'
-           + '要刷新或换 Key，勾下面的「覆盖已配置的平台」。</div>';
+           + '默认只新增没配过的平台，<b>已配置的原样不动</b>。'
+           + '同一个平台填了<b>新的 Key</b>会<b>新增一条并存</b>，旧的保留 —— '
+           + '多个账号各有各的免费额度，不该互相顶掉。</div>';
   html += '<label style="display:flex;align-items:center;gap:6px;font-size:13px;'
         + 'margin:8px 0 4px;cursor:pointer;">'
         + '<input type="checkbox" id="pf_overwrite" onchange="updatePresetApplyBtn()">'
-        + '覆盖已配置的平台（会丢弃原配置，含组队同步来的上游）</label>';
+        + '重新拉取已配置平台的模型列表（Key 相同时；会重置免费标记与禁用状态）</label>';
   html += '<div class="preset-warn" id="presetWarn"></div>';
 
   function section(title, hint, list) {
@@ -3608,7 +3629,7 @@ async function applyPreset() {
   // 有覆盖操作时弹确认框
   if (willOverwrite.length) {
     // 两步确认：覆盖已有配置（会丢旧 Key）
-    const confirmMsg = '以下平台已存在配置，将被新 Key 覆盖：' + willOverwrite.join('、') + '。再点一次「一键配置」确认';
+    const confirmMsg = '将重新拉取这些已配置平台的模型列表（Key 不变，但免费标记与禁用状态会重置）：' + willOverwrite.join('、') + '。再点一次「一键配置」确认';
     if (!stepConfirm('preset-overwrite', confirmMsg)) return;
   }
   btn.disabled = true; btn.textContent = '配置中请耐心等待…';
