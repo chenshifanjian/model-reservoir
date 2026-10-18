@@ -30,6 +30,24 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt pyinstaller
 
+      # protocol.py 是与服务端仓库共用的密钥派生实现，两份必须字节一致，
+      # 否则会出现「客户端加密、服务端验不过码」。服务端仓库：
+      #   https://github.com/chenshifanjian/reservoir-team
+      # 本工作流不含未受信输入，无命令注入面。
+      - name: 协议一致性（与服务端仓库对比）
+        run: |
+          set -e
+          echo "本仓库 protocol.py:"
+          sha256sum protocol.py
+          curl -fsSL -o /tmp/server_protocol.py \
+            https://raw.githubusercontent.com/chenshifanjian/reservoir-team/main/protocol.py
+          if ! diff -q protocol.py /tmp/server_protocol.py > /dev/null; then
+            echo "::error::protocol.py 与服务端仓库不一致（协议漂移）。改协议必须两边同时改。"
+            diff protocol.py /tmp/server_protocol.py || true
+            exit 1
+          fi
+          echo "protocol.py 与服务端仓库一致"
+
       - name: Run tests
         run: python -m pytest tests/ -q
 
