@@ -3237,7 +3237,7 @@ async function openVisionConfig() {
     }).join('');
     document.getElementById('visionCount').textContent = '已选 ' + selected.size + ' · 共 ' + opts.length + ' 个模型';
   } catch (e) {
-    list.innerHTML = '<div class="empty" style="color:var(--danger)">加载失败：' + e.message + '</div>';
+    list.innerHTML = '<div class="empty" style="color:var(--danger)">加载失败：' + escHtml(e.message) + '</div>';
   }
 }
 
@@ -3383,7 +3383,7 @@ async function openPresetModal() {
     if (r.doc_url) { dl.href = r.doc_url; dl.style.display = ''; } else { dl.style.display = 'none'; }
     renderPresetCards(r);
   } catch (e) {
-    body.innerHTML = '<div style="text-align:center; padding:32px; color:var(--danger);">加载预设失败：' + (e.message||'') + '</div>';
+    body.innerHTML = '<div style="text-align:center; padding:32px; color:var(--danger);">加载预设失败：' + escHtml((e.message||'')) + '</div>';
   }
 }
 
