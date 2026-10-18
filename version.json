@@ -1,9 +1,9 @@
 {
-  "version": "1.8.0",
+  "version": "1.8.1",
   "min_version": "",
-  "release_page": "https://github.com/chenshifanjian/model-reservoir/releases/tag/v1.8.0",
-  "release_notes": "v1.8.0：**免费档接入** —— 一键配置从 3 个平台扩到 10 个，其中两个免 Key，装好就能用。\n\n## 免费档（新功能）\n\n「一键配置」按要不要 Key 分成两组：\n\n- **免 Key，开箱即用**：Ollama、LM Studio（本机推理，服务起来直接配，不用填任何东西）\n- **免费注册拿 Key**（都不绑卡）：OpenRouter、Groq、Cerebras、Google Gemini、GitHub Models\n\n每张卡片印着人话额度（如「约 30 请求/分」「无限（吃本机算力）」）—— 光说免费不给额度，没法判断够不够用。\n\n**付费 Key 兜底照旧**：模型仍然全部列出来、用徽章区分免费/付费，由你决定启用哪个，不靠隐藏。\n\n## 免费标签不再骗人\n\n旧版表单里 `free_only` 是写死的 `true`，对混合上游（如 OpenRouter 既有免费又有付费模型）会把付费模型整个过滤掉。现在默认列出全部，改成真实复选框由你决定。\n\n## 可用性判定分层\n\n`429 限流` 和 `404 模型下线` 原本待遇一样，都会把候选路由降级。现在只有明确拒绝路由的才降，临时故障（上游半夜抽风）仍留在主候选池 —— 质量分与熔断已经在实时惩罚它了。\n\n## 安全加固\n\n- 管理与转发两个鉴权函数都改用恒定时间比较（`!=` 会按首个不匹配字节提前返回，同机进程可据此推测密钥）\n- 协调服务器移除多余的 CORS 响应头\n- SECURITY.md 新增「纵深防御与信任边界」：每层挡什么、挡不住什么，以及诚实的已知边界清单\n",
-  "download_url_windows": "https://github.com/chenshifanjian/model-reservoir/releases/download/v1.8.0/ModelReservoir-v1.8.0-windows.exe",
-  "download_url_linux": "https://github.com/chenshifanjian/model-reservoir/releases/download/v1.8.0/ModelReservoir-v1.8.0-linux-x86_64",
-  "download_url_macos": "https://github.com/chenshifanjian/model-reservoir/releases/download/v1.8.0/ModelReservoir-v1.8.0-macos.zip"
+  "release_page": "https://github.com/chenshifanjian/model-reservoir/releases/tag/v1.8.1",
+  "release_notes": "v1.8.1：一键配置**默认不再覆盖已配置的平台**。\n\n## 默认只补缺，不动已有的\n\n再点「一键配置」时，已经配好的平台会被跳过并明确点名（「已配置，本次跳过」），\n不会重建条目 —— 你手动调过的 `free_only`、禁用的模型、组队同步来的上游都保持原样。\n\n这在多人各自注册免费账号的场景下尤其重要：每人机器上的配置都是自己调的，\n一键配置的定位应该是「把缺的补上」，不是「把配好的重建一遍」。\n\n要刷新模型列表或换 Key，勾上新加的「**覆盖已配置的平台**」开关（默认关闭）。\n\n---\n\n以下为 v1.8.0 的内容：**免费档接入** —— 一键配置从 3 个平台扩到 10 个，其中两个免 Key，装好就能用。\n\n## 免费档（新功能）\n\n「一键配置」按要不要 Key 分成两组：\n\n- **免 Key，开箱即用**：Ollama、LM Studio（本机推理，服务起来直接配，不用填任何东西）\n- **免费注册拿 Key**（都不绑卡）：OpenRouter、Groq、Cerebras、Google Gemini、GitHub Models\n\n每张卡片印着人话额度（如「约 30 请求/分」「无限（吃本机算力）」）—— 光说免费不给额度，没法判断够不够用。\n\n**付费 Key 兜底照旧**：模型仍然全部列出来、用徽章区分免费/付费，由你决定启用哪个，不靠隐藏。\n\n## 免费标签不再骗人\n\n旧版表单里 `free_only` 是写死的 `true`，对混合上游（如 OpenRouter 既有免费又有付费模型）会把付费模型整个过滤掉。现在默认列出全部，改成真实复选框由你决定。\n\n## 可用性判定分层\n\n`429 限流` 和 `404 模型下线` 原本待遇一样，都会把候选路由降级。现在只有明确拒绝路由的才降，临时故障（上游半夜抽风）仍留在主候选池 —— 质量分与熔断已经在实时惩罚它了。\n\n## 安全加固\n\n- 管理与转发两个鉴权函数都改用恒定时间比较（`!=` 会按首个不匹配字节提前返回，同机进程可据此推测密钥）\n- 协调服务器移除多余的 CORS 响应头\n- SECURITY.md 新增「纵深防御与信任边界」：每层挡什么、挡不住什么，以及诚实的已知边界清单\n",
+  "download_url_windows": "https://github.com/chenshifanjian/model-reservoir/releases/download/v1.8.1/ModelReservoir-v1.8.1-windows.exe",
+  "download_url_linux": "https://github.com/chenshifanjian/model-reservoir/releases/download/v1.8.1/ModelReservoir-v1.8.1-linux-x86_64",
+  "download_url_macos": "https://github.com/chenshifanjian/model-reservoir/releases/download/v1.8.1/ModelReservoir-v1.8.1-macos.zip"
 }

@@ -125,7 +125,7 @@ META_FILE = DATA_DIR / "models_meta.json"
 ROUTERS_FILE = DATA_DIR / "routers.json"
 ANNOUNCEMENT_FILE = DATA_DIR / "announcement.json"
 
-APP_VERSION = "1.8.0"
+APP_VERSION = "1.8.1"
 
 MAX_HISTORY_DAYS = 30
 MAX_USAGE_DAYS = 30        # 按天数范围查询(近24小时/7天/30天)的上限
@@ -1300,6 +1300,11 @@ class OpenUrlIn(BaseModel):
 
 class PresetApplyIn(BaseModel):
     keys: dict = {}
+    # 默认不覆盖已配置的平台。理由：一键配置的定位是「把缺的补上」，
+    # 不是「把配好的重建一遍」。团队里每人各自注册免费账号、各自手调
+    # free_only 与模型禁用状态，一键配置若重建条目会把这些改动抹掉。
+    # 只有用户显式勾选覆盖时才动已有的。
+    overwrite_existing: bool = False
 
 
 # ============================================================
@@ -2459,6 +2464,7 @@ async def apply_preset(data: PresetApplyIn, _=Depends(verify_admin)):
     preset = await load_preset()
     platforms = preset.get("platforms", {})
     keys = data.keys or {}
+    overwrite = bool(data.overwrite_existing)
     results = {}
     created_names = []
 
@@ -2484,6 +2490,20 @@ async def apply_preset(data: PresetApplyIn, _=Depends(verify_admin)):
                 # 所以这类平台跳过 Key 校验，直接用空 Key 走探测（空 Key 对
                 # 本机推理服务是正确的，转发时 header 就是 Bearer 空值）。
                 no_key_needed = plat_cfg.get("needs_key") is False
+
+                # 默认不动已配置的平台。留空 Key 老逻辑会拿旧 Key 重建条目
+                # （重置 free_only、模型禁用状态等手调设置），团队场景下这是
+                # 回退而非保留。要动必须显式勾选覆盖。
+                if plat_name in existing_names and not overwrite:
+                    existing = next((p for p in providers if p["name"] == plat_name), None)
+                    team_src = (existing or {}).get("team_origin")
+                    results[plat_name] = {
+                        "ok": True,
+                        "detail": (f"已配置，本次跳过（来自队伍 {team_src}）" if team_src
+                                   else "已配置，本次跳过"),
+                    }
+                    continue
+
                 if not key and not no_key_needed:
                     if plat_name in existing_names:
                         existing = next((p for p in providers if p["name"] == plat_name), None)

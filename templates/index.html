@@ -3455,7 +3455,16 @@ function renderPresetCards(preset) {
   const noKey = entries.filter(function (e) { return e[1].needs_key === false; });
   const withKey = entries.filter(function (e) { return e[1].needs_key !== false; });
 
-  let html = '<div class="preset-intro preset-notice">已配置的平台可留空 Key 保留原配置；填入新 Key 会覆盖旧配置。</div>';
+  // 默认不动已配置的平台：一键配置的定位是「把缺的补上」，不是「把配好的重建一遍」。
+  // 团队里每人各自注册免费账号、各自手调 free_only 与模型禁用状态，
+  // 重建条目会把这些改动抹掉。要动必须显式勾选。
+  let html = '<div class="preset-intro preset-notice">'
+           + '默认只新增没配过的平台，<b>已配置的原样不动</b>；'
+           + '要刷新或换 Key，勾下面的「覆盖已配置的平台」。</div>';
+  html += '<label style="display:flex;align-items:center;gap:6px;font-size:13px;'
+        + 'margin:8px 0 4px;cursor:pointer;">'
+        + '<input type="checkbox" id="pf_overwrite" onchange="updatePresetApplyBtn()">'
+        + '覆盖已配置的平台（会丢弃原配置，含组队同步来的上游）</label>';
   html += '<div class="preset-warn" id="presetWarn"></div>';
 
   function section(title, hint, list) {
@@ -3576,6 +3585,7 @@ async function applyPreset() {
   if (!_presetData) return;
   const keys = {};
   const existingNames = new Set(_existingProviders.map(p => p.name));
+  const overwrite = !!document.getElementById('pf_overwrite')?.checked;
   const willOverwrite = [];
   const missing = [];
   for (const name of Object.keys(_presetData.platforms)) {
@@ -3583,7 +3593,8 @@ async function applyPreset() {
     const v = (el && el.value || '').trim();
     if (v) {
       keys[name] = v;
-      if (existingNames.has(name)) willOverwrite.push(name);
+      // 不勾覆盖时已配置的会被后端跳过，这里不该提示「将被覆盖」
+      if (overwrite && existingNames.has(name)) willOverwrite.push(name);
     } else {
       // 免 Key 平台没有输入框（el 为 null），不算缺失 —— 后端会直接用空 Key
       // 去探测本机服务并添加，不需要用户填任何东西。
@@ -3604,7 +3615,7 @@ async function applyPreset() {
   closePresetModal();  // 关闭一键配置窗口
   document.getElementById('presetWaitModal').classList.add('show');  // 弹出等待提示
   try {
-    const r = await (await apiFetch('/api/providers/preset', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ keys }) })).json();
+    const r = await (await apiFetch('/api/providers/preset', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ keys, overwrite_existing: overwrite }) })).json();
     if (r && r.ok) {
       let msg = '';
       if (r.results) {
