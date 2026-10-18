@@ -1245,7 +1245,12 @@ class ProviderIn(BaseModel):
     base_url: str
     api_key: str
     models: list[str] = []
-    free_only: bool = True
+    # 拉模型列表时是否只保留免费模型。
+    # 默认 False：混合上游（如 OpenRouter 既有 :free 又有付费模型）在 True 下
+    # 会把付费模型整个过滤掉，而付费兜底正是这个网关的本职。免费与否交给
+    # 下面的 free_status_override 与徽章标注，靠「隐藏」不是办法。
+    # presets.json 里的 NVIDIA 等仍显式写 True，那是对具体平台的判断，不受此影响。
+    free_only: bool = False
     # 免费标记人工覆盖：auto（按证据分级自动判定）| free | paid | unknown
     free_status_override: str = "auto"
     # 上游 /models 自报的价目（拉模型列表时顺带存下），是"免费"判定最权威的证据

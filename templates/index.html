@@ -1488,6 +1488,17 @@ td .sub-cell { font-size: 11px; color: var(--text-secondary); margin-top: 2px; }
         </select>
         <div class="form-hint">自动判定的依据：上游自报 pricing → 模型名免费后缀 → 本机/内网 → 公开价目源</div>
       </div>
+      <div class="form-field">
+        <label style="display:flex; align-items:center; gap:8px; cursor:pointer;">
+          <input type="checkbox" id="pf_free_only">
+          <span>拉模型列表时只保留免费模型</span>
+        </label>
+        <!-- 这个开关以前是写死的 true：混合上游（如 OpenRouter，既有 :free 又有付费模型）
+             会把付费模型整个过滤掉，而付费兜底正是这个网关的本职。
+             默认改为不勾选：全部列出、用上面的徽章区分免费/付费，由用户决定启用哪个。 -->
+        <div class="form-hint">默认不勾选：全部模型都列出来，用「免费/付费」徽章区分。
+          只有当你明确不想要付费模型时才勾上（例如纯白嫖场景）。</div>
+      </div>
       <div id="providerModalMsg" style="font-size: 12px; display: none;"></div>
     </div>
     <div class="modal-footer">
@@ -2374,6 +2385,8 @@ async function openProviderEditor(name) {
       const list = await r.json();
       const p = list.find(x => x.name === name) || {};
       document.getElementById('pf_base_url').value = p.base_url || '';
+      document.getElementById('pf_free_only').checked =
+        p.free_only === true;          // 老数据里没有这个键，缺省视为 false
       document.getElementById('pf_free_override').value =
         (p.free_status && p.free_status.override) || 'auto';
     } catch (e) { if (e.message !== 'Unauthorized') console.error(e); }
@@ -2390,6 +2403,7 @@ async function openProviderEditor(name) {
     document.getElementById('pf_api_key').value = '';
     document.getElementById('pf_api_key').placeholder = 'sk-...';
     document.getElementById('pf_free_override').value = 'auto';
+    document.getElementById('pf_free_only').checked = false;   // 新增默认列出全部模型
   }
   document.getElementById('pf_show_key').checked = false;
   document.getElementById('pf_api_key').type = 'password';
@@ -2621,7 +2635,9 @@ async function submitProviderForm() {
   const name = document.getElementById('pf_name').value.trim();
   const baseUrl = document.getElementById('pf_base_url').value.trim();
   const apiKey = document.getElementById('pf_api_key').value;
-  const freeOnly = true;
+  // 从控件读，不再写死。默认不勾选 —— 混合上游的付费模型必须列出来，
+  // 付费兜底是这个网关的本职，不该被一个常量吞掉。
+  const freeOnly = document.getElementById('pf_free_only').checked === true;
 
   if (!name || !baseUrl) { showProviderMsg('名称和 Base URL 不能为空', 'error'); return; }
   if (providerEditMode === 'add' && !apiKey) { showProviderMsg('添加时必须填写 API Key', 'error'); return; }

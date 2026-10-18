@@ -1324,3 +1324,83 @@ def test_unprobed_is_not_inconclusive():
         {"P||x": {"ok": 0, "fail": 1, "error": 0, "total": 1, "latencies": []}},
         ["P||x"], {"P||x": {"status": "fail", "code": 400, "detail": "max_tokens too large"}})
     assert rows2[0]["availability_state"] == "inconclusive", rows2[0]
+
+
+# ============================================================
+# 无效控件审查（学自 dsh-our-free-model：提供一个无效控件比不提供更糟）
+#
+# 背景：前端曾写死 `const freeOnly = true`，混合上游（既有免费又有付费模型）
+# 的付费模型被整个过滤掉 —— 而付费兜底正是这个网关的本职。
+# ============================================================
+
+def test_provider_in_defaults_to_listing_all_models(monkeypatch):
+    """新增上游默认应列出全部模型，而不是只列免费的。
+
+    免费与否交给 free_status_override 与徽章标注，靠「隐藏」不是办法。
+    """
+    p = app_module.ProviderIn(name="P", base_url="https://x/v1", api_key="k")
+    assert p.free_only is False, "新增上游不应默认过滤掉付费模型"
+
+
+def test_free_only_true_does_filter_paid_models(monkeypatch):
+    """记录 free_only=True 的实际行为：混合上游的付费模型会被过滤。
+
+    这条测试不是在认可这个行为，而是把它钉住 —— 万一以后有人把默认值
+    改回 True，这里会失败并提醒他想想付费模型去哪了。
+    """
+    class _Resp:
+        status_code = 200
+
+        def json(self):
+            return {"data": [
+                {"id": "agg/free-alpha", "pricing": {"prompt": "0", "completion": "0"}},
+                {"id": "agg/free-bravo",  "pricing": {"prompt": "0", "completion": "0"}},
+                {"id": "agg/paid-xray",   "pricing": {"prompt": "0.5", "completion": "1.5"}},
+                {"id": "agg/paid-yankee", "pricing": {"prompt": "2.0", "completion": "8.0"}},
+            ]}
+
+    class _Client:
+        async def get(self, *a, **k):
+            return _Resp()
+
+    monkeypatch.setattr(app_module, "http_client", _Client())
+    a = asyncio.run(app_module.fetch_models_with_pricing("https://x/v1", "k", True))
+    b = asyncio.run(app_module.fetch_models_with_pricing("https://x/v1", "k", False))
+    assert sorted(a[0]) == ["agg/free-alpha", "agg/free-bravo"], a[0]
+    assert len(b[0]) == 4, b[0]
+
+
+def test_free_only_true_falls_back_to_all_when_no_free_models(monkeypatch):
+    """纯付费上游不受影响：找不到免费模型就返回全部（兜底仍在）。"""
+
+    class _Resp:
+        status_code = 200
+
+        def json(self):
+            return {"data": [
+                {"id": "deepseek-chat"},
+                {"id": "deepseek-reasoner"},
+            ]}
+
+    class _Client:
+        async def get(self, *a, **k):
+            return _Resp()
+
+    monkeypatch.setattr(app_module, "http_client", _Client())
+    got = asyncio.run(app_module.fetch_models_with_pricing("https://x/v1", "k", True))
+    assert sorted(got[0]) == ["deepseek-chat", "deepseek-reasoner"], got[0]
+
+
+def test_frontend_has_free_only_control():
+    """前端必须有真实的控件，不能是写死的常量。
+
+    「提供一个无效控件比不提供更糟」的变体：写死的常量伪装成配置，
+    用户以为自己在选，实际永远是同一个值。
+    """
+    import pathlib
+    html = pathlib.Path(__file__).resolve().parent.parent / "templates" / "index.html"
+    s = html.read_text(encoding="utf-8")
+    assert 'id="pf_free_only"' in s, "缺少 free_only 复选框"
+    assert "const freeOnly = true" not in s, "freeOnly 仍被写死为 true"
+    # 保存时必须读控件
+    assert "pf_free_only').checked" in s
