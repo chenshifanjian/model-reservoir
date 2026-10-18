@@ -16,12 +16,13 @@ from __future__ import annotations
 
 import json
 import secrets
-import sys
 import time
 import uuid
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parent / "team"))
+# protocol.py 与 app.py 同在项目根目录 —— 这样 PyInstaller 能静态发现并打进包。
+# 以前放在 team/ 子目录 + sys.path.insert 动态找，源码模式能跑但打包版必崩
+# （冻结环境里没有 team/ 子目录，且动态路径 PyInstaller 追踪不到）。
 from protocol import (                       # noqa: E402
     code_hash, derive_team_key, encrypt_for_member, decrypt_as_member,
 )
