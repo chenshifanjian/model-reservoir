@@ -1575,6 +1575,23 @@ function showToast(msg, type = 'ok', duration = 3000) {
   _toastTimer = setTimeout(() => { el.className = 'toast ' + type; }, duration);
 }
 
+// 两步确认：替代 confirm()。
+// 为什么不用 confirm()：pywebview/WebKitGTK 的模态对话框会挂起 JS 线程，
+// 表现为「点了没反应、整页无响应」，CDP Runtime.evaluate 连 readyState 都超时。
+// 用法：危险操作第一次点 → toast 提示；3 秒内再点同一操作 → 执行；超时自动失效。
+// 不依赖 event.target（onclick 内联与函数内部调用都可用）。
+const _stepArmed = {};
+function stepConfirm(key, msg) {
+  const now = Date.now();
+  if (_stepArmed[key] && (now - _stepArmed[key]) < 3000) {
+    delete _stepArmed[key];
+    return true;
+  }
+  _stepArmed[key] = now;
+  showToast(msg, 'warn', 3000);
+  return false;
+}
+
 /* ============ 主题（三态：auto 跟随系统 / light / dark） ============ */
 function applyTheme() {
   var pref = localStorage.getItem('theme') || 'auto';
@@ -2280,10 +2297,10 @@ async function saveModelSelection() {
       load();
       checkAll();
     } else {
-      alert("保存失败");
+      showToast("保存失败", "error");
     }
   } catch (e) {
-    if (e.message !== 'Unauthorized') { console.error(e); alert("请求发生错误"); }
+    if (e.message !== 'Unauthorized') { console.error(e); showToast("请求发生错误", "error"); }
   } finally {
     btn.innerText = originalText;
     btn.disabled = false;
@@ -2488,7 +2505,7 @@ async function saveCapability() {
     renderOutputModChips();
     renderOutputModelList();
   } catch (e) {
-    alert('保存失败：' + e.message);
+    showToast('保存失败：' + e.message, 'error');
   } finally {
     btn.disabled = false;
     btn.textContent = oldText;
@@ -2618,7 +2635,8 @@ async function submitProviderForm() {
 }
 
 async function deleteProvider(name) {
-  if (!confirm('确定删除提供商「' + name + '」吗？\n该操作会从 providers.json 移除该提供商及其模型配置，不可恢复。')) return;
+  // 两步确认：不可恢复的删除操作
+  if (!stepConfirm('del-provider:' + name, '将删除提供商「' + name + '」及其模型配置，不可恢复。再点一次「删除」确认')) return;
   try {
     const res = await apiFetch('/api/providers/' + encodeURIComponent(name), { method: 'DELETE' });
     if (res.ok) { showToast('已删除提供商「' + name + '」', 'ok'); load(); }
@@ -3302,7 +3320,7 @@ function addRouterGroup() {
 }
 
 function removeRouterGroup(name) {
-  if (!confirm('确定删除路由组「' + name + '」？')) return;
+  if (!stepConfirm('del-router:' + name, '将删除路由组「' + name + '」。再点一次「删除」确认')) return;
   delete routersData[name];
   renderRouterList();
 }
@@ -3472,8 +3490,9 @@ async function applyPreset() {
   }
   // 有覆盖操作时弹确认框
   if (willOverwrite.length) {
-    const confirmMsg = '以下平台已存在配置，填入新 Key 将覆盖旧配置：\n' + willOverwrite.join('、') + '\n\n确定要覆盖吗？';
-    if (!confirm(confirmMsg)) return;
+    // 两步确认：覆盖已有配置（会丢旧 Key）
+    const confirmMsg = '以下平台已存在配置，将被新 Key 覆盖：' + willOverwrite.join('、') + '。再点一次「一键配置」确认';
+    if (!stepConfirm('preset-overwrite', confirmMsg)) return;
   }
   btn.disabled = true; btn.textContent = '配置中请耐心等待…';
   closePresetModal();  // 关闭一键配置窗口
@@ -3923,7 +3942,9 @@ function editPortInline() {
     const newPort = parseInt(input.value, 10);
     if (!newPort || newPort < 1024 || newPort > 65535) { showToast('端口范围: 1024-65535', 'error'); return; }
     if (String(newPort) === currentPort) { restorePortEdit(); return; }
-    if (!confirm('修改端口为 ' + newPort + '？\n\n注意：所有对接工具（ChatGPT/Codex、ChatBox 等）\n的地址都需从 ' + currentPort + ' 改为 ' + newPort + '\n\n程序将自动重启。')) return;
+    // 两步确认：改端口会让所有对接工具失效 + 程序重启
+    if (!stepConfirm('change-port:' + newPort,
+        '改为 ' + newPort + ' 后，对接工具地址都要改，程序将重启。再点一次「保存」确认')) return;
     try {
       await apiFetch('/api/port', { method:'PUT', headers:{'Content-Type':'application/json'}, body: JSON.stringify({port:newPort}) });
       showToast('端口已保存，程序即将重启...', 'ok');
