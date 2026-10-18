@@ -992,7 +992,7 @@ async def check_model(base_url: str, api_key: str, model: str) -> dict:
         "stream": False,
     }
     headers = {
-        "Authorization": f"Bearer {api_key}",
+        **auth_headers(api_key),
         "Content-Type": "application/json",
     }
     start = time.time()
@@ -1019,9 +1019,21 @@ async def check_model(base_url: str, api_key: str, model: str) -> dict:
         return {"status": "error", "latency_ms": latency, "detail": str(e)[:200]}
 
 
+def auth_headers(api_key: str | None) -> dict:
+    """上游鉴权头。
+
+    空 Key（Ollama / LM Studio 这类本机推理服务不需要鉴权）时**不发
+    Authorization** —— 拼一个 "Bearer "（末尾空格）是非法 header 值，
+    httpx 会直接抛 Illegal header value。免 Key 平台的 Key 就是空串，
+    探测、拉模型、实际转发三条路径都得走这里，漏一处就会在运行时炸。
+    """
+    key = (api_key or "").strip()
+    return {"Authorization": f"Bearer {key}"} if key else {}
+
+
 async def fetch_model_details(base_url: str, api_key: str) -> dict:
     url = base_url.rstrip("/") + "/models"
-    headers = {"Authorization": f"Bearer {api_key}"}
+    headers = auth_headers(api_key)
     try:
         resp = await http_client.get(url, headers=headers, timeout=15)
         if resp.status_code == 200:
@@ -1049,7 +1061,7 @@ async def fetch_models_with_pricing(base_url: str, api_key: str, free_only: bool
     pricing 只有 OpenRouter/SiliconFlow 这类"价目开放"的上游才给，其余为空 dict。
     """
     url = base_url.rstrip("/") + "/models"
-    headers = {"Authorization": f"Bearer {api_key}"}
+    headers = auth_headers(api_key)
     pricing_map: dict[str, dict] = {}
     try:
         resp = await http_client.get(url, headers=headers, timeout=15)
@@ -1093,7 +1105,7 @@ async def fetch_models(base_url: str, api_key: str, free_only: bool = True) -> l
 async def verify_provider_key_impl(base_url: str, api_key: str) -> dict:
     """校验上游 key 是否有效：调上游 /models 接口，401/403 判定 key 无效"""
     url = base_url.rstrip("/") + "/models"
-    headers = {"Authorization": f"Bearer {api_key}"}
+    headers = auth_headers(api_key)
     try:
         resp = await http_client.get(url, headers=headers, timeout=15)
         if resp.status_code in (401, 403):
@@ -2923,7 +2935,7 @@ async def _stream_with_failover(candidates, body, is_router, prelude: str = ""):
 
                 url = provider["base_url"].rstrip("/") + "/chat/completions"
                 headers = {
-                    "Authorization": f"Bearer {provider['api_key']}",
+                    **auth_headers(provider["api_key"]),
                     "Content-Type": "application/json",
                 }
 
@@ -3099,7 +3111,7 @@ async def proxy_chat(request: Request, force: bool = False):
             req_body["model"] = MODEL_ALIASES.get(model, model)
             url = provider["base_url"].rstrip("/") + "/chat/completions"
             headers = {
-                "Authorization": f"Bearer {provider['api_key']}",
+                **auth_headers(provider["api_key"]),
                 "Content-Type": "application/json",
             }
 

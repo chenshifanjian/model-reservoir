@@ -62,3 +62,15 @@ def test_preset_sources_stay_in_sync():
             assert b[name].get(field) == j[name].get(field), (name, field)
     # 至少要有免 Key 平台，否则「免 Key 开箱即用」整组是空谈
     assert any(c.get("needs_key") is False for c in j.values())
+
+
+def test_auth_headers_omits_header_for_empty_key():
+    """空 Key 不能拼 'Bearer '（末尾空格）—— httpx 会抛 Illegal header value
+
+    本机推理服务（Ollama / LM Studio）不需要鉴权，免 Key 平台的 Key 就是空串。
+    """
+    import app as A
+    assert A.auth_headers("") == {}
+    assert A.auth_headers(None) == {}
+    assert A.auth_headers("   ") == {}          # 纯空白同样视为无
+    assert A.auth_headers("sk-x") == {"Authorization": "Bearer sk-x"}
