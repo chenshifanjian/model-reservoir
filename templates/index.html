@@ -2711,18 +2711,7 @@ let teamConfirmKickArmed = null, teamConfirmLeaveArmed = null;
 let teamSyncOpen = null;      // 当前展开同步面板的 team_id
 let teamPendingSync = null;   // 待推送的 {team_id, client_id}
 
-function escHtml(s) {
-  return String(s == null ? '' : s).replace(/[&<>"']/g, c => ({
-    '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
-  }[c]));
-}
-
 // 所有拼进 innerHTML 的动态文本都必须过 escHtml/escTeam（含服务端返回的 error）
-function escHtml(s) {
-  return String(s == null ? '' : s).replace(/[&<>"']/g, c => ({
-    '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
-  }[c]));
-}
 
 // 所有拼进 innerHTML 的动态文本都必须过 escHtml/escTeam（含服务端返回的 error）
 function teamMsg(el, text, isErr) {
@@ -3239,9 +3228,11 @@ async function openVisionConfig() {
     opts.sort((a, b) => (_visionModelSet.has(b.model) ? 1 : 0) - (_visionModelSet.has(a.model) ? 1 : 0));
     list.innerHTML = opts.map(opt => {
       const checked = selected.has(opt.model) ? 'checked' : '';
+      // 模型名/提供商来自上游 API，可能含 HTML 或引号 —— 属性上下文尤其危险
+      const m = escHtml(opt.model), pv = escHtml(opt.provider);
       return `<label class="model-checkbox-item">
-        <input type="checkbox" class="vision-cb" value="${opt.model}" ${checked}>
-        <div class="model-checkbox-label"><span class="model-provider-badge">${opt.provider}</span>${opt.model}</div>
+        <input type="checkbox" class="vision-cb" value="${m}" ${checked}>
+        <div class="model-checkbox-label"><span class="model-provider-badge">${pv}</span>${m}</div>
       </label>`;
     }).join('');
     document.getElementById('visionCount').textContent = '已选 ' + selected.size + ' · 共 ' + opts.length + ' 个模型';
@@ -3294,10 +3285,14 @@ function renderRouterList() {
     const boxes = allModelOptions.map(opt => {
       const checked = selected.has(opt.model) ? 'checked' : '';
       const ctx = (modelDetails[opt.model] || {}).context_length;
-      const ctxStr = ctx ? ' · ' + ctx : '';
+      const ctxStr = ctx ? ' · ' + escHtml(ctx) : '';
+      // 上游可控的名字一律转义：value/data-router 是属性上下文，裸插会被
+      // 含引号的模型名突破；浏览器解析属性时会解码实体，所以 cb.value 读回
+      // 仍是原始值，saveRouters 的 round-trip 不受影响。
+      const m = escHtml(opt.model), pv = escHtml(opt.provider), rn = escHtml(name);
       return `<label class="model-checkbox-item" style="padding:6px 10px;margin-bottom:4px;">
-        <input type="checkbox" class="router-model-cb" data-router="${name}" value="${opt.model}" ${checked}>
-        <div class="model-checkbox-label" style="font-size:13px;"><span class="model-provider-badge">${opt.provider}</span>${opt.model}<span style="color:var(--text-secondary);font-size:11px;margin-left:4px;">${ctxStr}</span></div>
+        <input type="checkbox" class="router-model-cb" data-router="${rn}" value="${m}" ${checked}>
+        <div class="model-checkbox-label" style="font-size:13px;"><span class="model-provider-badge">${pv}</span>${m}<span style="color:var(--text-secondary);font-size:11px;margin-left:4px;">${ctxStr}</span></div>
       </label>`;
     }).join('');
     return `<div style="border:1px solid var(--mac-border);border-radius:8px;padding:12px;background:rgba(255,255,255,0.4);">
@@ -3438,11 +3433,11 @@ async function verifyPresetKey(name) {
   try {
     const r = await (await apiFetch('/api/providers/verify-key', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ base_url: cfg.base_url, api_key: key }) })).json();
     _presetKeyStatus[name] = r;
-    if (r && r.ok) stEl.innerHTML = '<span style="color:var(--success);">✓ ' + (r.detail||'连接成功') + '</span>';
-    else stEl.innerHTML = '<span style="color:var(--danger);">✗ ' + (r && r.detail || '校验失败') + '</span>';
+    if (r && r.ok) stEl.innerHTML = '<span style="color:var(--success);">✓ ' + escHtml(r.detail||'连接成功') + '</span>';
+    else stEl.innerHTML = '<span style="color:var(--danger);">✗ ' + escHtml(r && r.detail || '校验失败') + '</span>';
   } catch (e) {
     _presetKeyStatus[name] = { ok:false, detail:e.message };
-    if (stEl) stEl.innerHTML = '<span style="color:var(--danger);">✗ ' + e.message + '</span>';
+    if (stEl) stEl.innerHTML = '<span style="color:var(--danger);">✗ ' + escHtml(e.message) + '</span>';
   }
   updatePresetApplyBtn();
 }
@@ -3535,10 +3530,10 @@ async function testProviderKey() {
   if (st) st.innerHTML = '<span style="color:var(--text-secondary);">校验中…</span>';
   try {
     const r = await (await apiFetch('/api/providers/verify-key', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ base_url, api_key }) })).json();
-    if (r && r.ok) st.innerHTML = '<span style="color:var(--success);">✓ ' + (r.detail||'连接成功') + '</span>';
-    else st.innerHTML = '<span style="color:var(--danger);">✗ ' + (r && r.detail || '校验失败') + '</span>';
+    if (r && r.ok) st.innerHTML = '<span style="color:var(--success);">✓ ' + escHtml(r.detail||'连接成功') + '</span>';
+    else st.innerHTML = '<span style="color:var(--danger);">✗ ' + escHtml(r && r.detail || '校验失败') + '</span>';
   } catch (e) {
-    if (st) st.innerHTML = '<span style="color:var(--danger);">✗ ' + e.message + '</span>';
+    if (st) st.innerHTML = '<span style="color:var(--danger);">✗ ' + escHtml(e.message) + '</span>';
   }
 }
 
@@ -3663,7 +3658,7 @@ async function openFeishuModal() {
   try {
     const r = await apiFetch('/api/announcement');
     const d = await r.json();
-    if (!d.ok) { body.innerHTML = '<div class="empty">' + (d.content || '暂无公告') + '</div>'; return; }
+    if (!d.ok) { body.innerHTML = '<div class="empty">' + escHtml(d.content || '暂无公告') + '</div>'; return; }
     const md = d.content || '';
     body.innerHTML = renderMarkdown(md);
     if (d.hash) _lastAnnouncementHash = d.hash;
