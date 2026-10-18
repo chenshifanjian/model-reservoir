@@ -250,8 +250,14 @@ security = HTTPBearer(auto_error=False)
 
 
 def verify_client(credentials: HTTPAuthorizationCredentials = Depends(security)):
-    """客户端调用 /v1/* 的鉴权"""
-    if not credentials or credentials.credentials != LOCAL_API_KEY:
+    """客户端调用 /v1/* 的鉴权（本机对接工具用）"""
+    if not credentials:
+        raise HTTPException(status_code=401, detail="Invalid or missing API Key")
+    # 恒定时间比较，理由同 verify_admin：`!=` 在首个不匹配字节处提前返回，
+    # 同机其他进程可据此逐字节推测密钥。两个鉴权函数必须用同一套比较方式 ——
+    # 上一轮只改了 verify_admin，漏了这条对外的主路径。
+    if not LOCAL_API_KEY or not hmac.compare_digest(
+            credentials.credentials.encode("utf-8"), LOCAL_API_KEY.encode("utf-8")):
         raise HTTPException(status_code=401, detail="Invalid or missing API Key")
     return credentials
 
