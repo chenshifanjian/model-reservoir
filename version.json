@@ -1,9 +1,9 @@
 {
-  "version": "1.7.3",
+  "version": "1.8.0",
   "min_version": "",
-  "release_page": "https://github.com/chenshifanjian/model-reservoir/releases/tag/v1.7.3",
-  "release_notes": "v1.7.3：新增**组队**功能，并把整个界面里所有会卡死窗口的模态对话框清掉。\n\n## 组队（新功能）\n\n第五页「组队」：你可以建一个临时队伍、生成 6 位组队码，朋友装同版本软件输码入队；\n你批准后，可以**逐个上游**勾选同步给他——**默认不同步，勾了才给**。\n\n同步是端到端加密的：阿里云上只存密文信箱，看不到你的密钥，也不转发对话。\n关队后码立即失效，队员那边同步来的上游会自动置灰（模型全部禁用），记录保留可自行删除。\n\n**注意**：同步即复制密钥到对方机器，**无法远程收回**。只能让对方删除，或你自己去上游换 Key。\n\n## 界面不再卡死\n\npywebview 在 Linux 上用 WebKitGTK，`confirm()`/`prompt()`/`alert()` 会挂起整个 JS 线程，\n表现为「点了没反应、整页无响应」。本次把 7 处全部清掉：\n\n- 删除提供商、删除路由组、一键配置覆盖、改端口 → 改**两步确认**（点一次提示，3 秒内再点才执行）\n- 创建队伍 → 改页面内联输入框\n- 错误提示 → 改非阻塞 toast\n\n## 其他\n\n- 免费标签改按证据分级判定：上游自报价目 / 模型名后缀 / 本机内网 / 公开价目源；\n  没证据就老实标「未核实」，不再出现「从没成功过的模型被藏起来」这类问题\n- 模型管理弹窗每个模型标免费/付费，可按价格筛选\n- 所有拼进页面的动态文本都做了转义\n",
-  "download_url_windows": "https://github.com/chenshifanjian/model-reservoir/releases/download/v1.7.3/ModelReservoir-v1.7.3-windows.exe",
-  "download_url_linux": "https://github.com/chenshifanjian/model-reservoir/releases/download/v1.7.3/ModelReservoir-v1.7.3-linux-x86_64",
-  "download_url_macos": "https://github.com/chenshifanjian/model-reservoir/releases/download/v1.7.3/ModelReservoir-v1.7.3-macos.zip"
+  "release_page": "https://github.com/chenshifanjian/model-reservoir/releases/tag/v1.8.0",
+  "release_notes": "v1.8.0：**免费档接入** —— 一键配置从 3 个平台扩到 10 个，其中两个免 Key，装好就能用。\n\n## 免费档（新功能）\n\n「一键配置」按要不要 Key 分成两组：\n\n- **免 Key，开箱即用**：Ollama、LM Studio（本机推理，服务起来直接配，不用填任何东西）\n- **免费注册拿 Key**（都不绑卡）：OpenRouter、Groq、Cerebras、Google Gemini、GitHub Models\n\n每张卡片印着人话额度（如「约 30 请求/分」「无限（吃本机算力）」）—— 光说免费不给额度，没法判断够不够用。\n\n**付费 Key 兜底照旧**：模型仍然全部列出来、用徽章区分免费/付费，由你决定启用哪个，不靠隐藏。\n\n## 免费标签不再骗人\n\n旧版表单里 `free_only` 是写死的 `true`，对混合上游（如 OpenRouter 既有免费又有付费模型）会把付费模型整个过滤掉。现在默认列出全部，改成真实复选框由你决定。\n\n## 可用性判定分层\n\n`429 限流` 和 `404 模型下线` 原本待遇一样，都会把候选路由降级。现在只有明确拒绝路由的才降，临时故障（上游半夜抽风）仍留在主候选池 —— 质量分与熔断已经在实时惩罚它了。\n\n## 安全加固\n\n- 管理与转发两个鉴权函数都改用恒定时间比较（`!=` 会按首个不匹配字节提前返回，同机进程可据此推测密钥）\n- 协调服务器移除多余的 CORS 响应头\n- SECURITY.md 新增「纵深防御与信任边界」：每层挡什么、挡不住什么，以及诚实的已知边界清单\n",
+  "download_url_windows": "https://github.com/chenshifanjian/model-reservoir/releases/download/v1.8.0/ModelReservoir-v1.8.0-windows.exe",
+  "download_url_linux": "https://github.com/chenshifanjian/model-reservoir/releases/download/v1.8.0/ModelReservoir-v1.8.0-linux-x86_64",
+  "download_url_macos": "https://github.com/chenshifanjian/model-reservoir/releases/download/v1.8.0/ModelReservoir-v1.8.0-macos.zip"
 }
