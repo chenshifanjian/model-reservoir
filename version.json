@@ -1,8 +1,8 @@
 {
-  "version": "1.7.2",
+  "version": "1.7.3",
   "min_version": "",
-  "release_page": "https://github.com/chenshifanjian/model-reservoir/releases/tag/v1.7.2",
-  "release_notes": "v1.7.2：修一处监控页的显示问题——以前「模型可用性」只列出成功过的模型（本机 112 个只显示 55 个），现在声明过的模型全部列出，并且「服务异常（<50%）」筛选档终于能筛到真正 0% 的模型。每行还标出失败原因（上游无此模型 / 模型已下线 / 触发限流 / 无权限·不在套餐…），重启后不再空白。",
+  "release_page": "https://github.com/chenshifanjian/model-reservoir/releases/tag/v1.7.3",
+  "release_notes": "v1.7.3：新增**组队**功能，并把整个界面里所有会卡死窗口的模态对话框清掉。\n\n## 组队（新功能）\n\n第五页「组队」：你可以建一个临时队伍、生成 6 位组队码，朋友装同版本软件输码入队；\n你批准后，可以**逐个上游**勾选同步给他——**默认不同步，勾了才给**。\n\n同步是端到端加密的：阿里云上只存密文信箱，看不到你的密钥，也不转发对话。\n关队后码立即失效，队员那边同步来的上游会自动置灰（模型全部禁用），记录保留可自行删除。\n\n**注意**：同步即复制密钥到对方机器，**无法远程收回**。只能让对方删除，或你自己去上游换 Key。\n\n## 界面不再卡死\n\npywebview 在 Linux 上用 WebKitGTK，`confirm()`/`prompt()`/`alert()` 会挂起整个 JS 线程，\n表现为「点了没反应、整页无响应」。本次把 7 处全部清掉：\n\n- 删除提供商、删除路由组、一键配置覆盖、改端口 → 改**两步确认**（点一次提示，3 秒内再点才执行）\n- 创建队伍 → 改页面内联输入框\n- 错误提示 → 改非阻塞 toast\n\n## 其他\n\n- 免费标签改按证据分级判定：上游自报价目 / 模型名后缀 / 本机内网 / 公开价目源；\n  没证据就老实标「未核实」，不再出现「从没成功过的模型被藏起来」这类问题\n- 模型管理弹窗每个模型标免费/付费，可按价格筛选\n- 所有拼进页面的动态文本都做了转义\n",
   "download_url_windows": "https://github.com/chenshifanjian/model-reservoir/releases/download/v1.7.2/ModelReservoir-v1.7.2-windows.exe",
   "download_url_linux": "https://github.com/chenshifanjian/model-reservoir/releases/download/v1.7.2/ModelReservoir-v1.7.2-linux-x86_64",
   "download_url_macos": "https://github.com/chenshifanjian/model-reservoir/releases/download/v1.7.2/ModelReservoir-v1.7.2-macos.zip"
