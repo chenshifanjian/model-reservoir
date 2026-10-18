@@ -1285,9 +1285,29 @@ class PresetApplyIn(BaseModel):
 def pick_available_models(model: str | None = None, force: bool = False) -> list[tuple[dict, str]]:
     """返回按质量排序的候选 (provider, model) 列表"""
     
-    raw = []
-    unhealthy_raw = []
-    
+    # 三层分级（学自 dsh-our-free-model 的可用性设计）：
+    #   tier 0 —— 可用 / 还没探过 / **临时故障**。临时故障仍留在主池：
+    #             上游半夜抽风是常态，而质量分与熔断已经在实时惩罚它了，
+    #             再把它踢出候选池只会让「一个 429」变成「这个模型没了」。
+    #   tier 1 —— 鉴权失败 / 不在套餐 / 地区受限 / 判不出来。模型本身还在，
+    #             是调用方配置问题，改配置就能用，所以排在临时故障后面但仍可用。
+    #   tier 2 —— 网关明确拒绝路由，或熔断中。这是唯一真的「别再试它」的档。
+    tiers: dict = {0: [], 1: [], 2: []}
+
+    def _tier_of(k: str) -> int:
+        h = health_status.get(k)
+        if is_circuit_open(k):
+            return 2                        # 运行时熔断比探测判定更实时
+        if not h or not h.get("status"):
+            return 0                        # 还没探过 = 不算问题
+        av = classify_availability(h.get("code"), h.get("status", "unknown"),
+                                   h.get("detail", ""))
+        if av == "unavailable":
+            return 2
+        if av in ("auth_failed", "plan_limited", "region_limited", "inconclusive"):
+            return 1
+        return 0                            # available / temporarily_broken
+
     # 如果请求的是自定义路由组
     if model in ROUTERS:
         target_models = set(ROUTERS[model])
@@ -1295,10 +1315,12 @@ def pick_available_models(model: str | None = None, force: bool = False) -> list
             for m in get_enabled_models(p):
                 if m in target_models:
                     k = f"{p['name']}||{m}"
-                    raw.append((p, m, k))
+                    # 路由组是用户显式圈定的模型，不做可用性判定 ——
+                    # 显式指定就意味着「我就要它」，探测结果只影响排序不影响去留
+                    tiers[0].append((p, m, k))
         scored = [
             (get_quality_score(k), get_avg_latency(k) or 1e9, p, m)
-            for p, m, k in raw
+            for p, m, k in tiers[0]
         ]
         scored.sort(key=lambda x: (-x[0], x[1]))
         return [(p, m) for _, _, p, m in scored]
@@ -1311,18 +1333,24 @@ def pick_available_models(model: str | None = None, force: bool = False) -> list
                 continue
             k = f"{p['name']}||{m}"
             if force or model:
-                raw.append((p, m, k))
+                # 指定了具体模型或强制重试：仍然分层，但 tier 2 也照收 ——
+                # 显式点名不该被探测历史挡在门外
+                tiers[_tier_of(k)].append((p, m, k))
                 continue
-            st = health_status.get(k, {}).get("status")
-            if not is_circuit_open(k) and st in ("ok", None, "unknown"):
-                raw.append((p, m, k))
-            else:
-                unhealthy_raw.append((p, m, k))
-    if not raw:
-        raw = unhealthy_raw
+            tiers[_tier_of(k)].append((p, m, k))
+
+    # 逐层回退，但**永不返回空列表**：只要还有一个模型，就有候选。
+    # （它那套设计里也有同一条：整轮探测全部被拒时同样保留，选择器不会为空）
+    for t in (0, 1, 2):
+        if tiers[t]:
+            picked = tiers[t]
+            break
+    else:
+        picked = []
+
     scored = [
         (get_quality_score(k), get_avg_latency(k) or 1e9, p, m)
-        for p, m, k in raw
+        for p, m, k in picked
     ]
     scored.sort(key=lambda x: (-x[0], x[1]))
     return [(p, m) for _, _, p, m in scored]
@@ -1714,6 +1742,78 @@ def classify_probe_failure(code, status, detail: str = "") -> str:
     return f"HTTP {code}"
 
 
+# 模型可用性的判定值域。与「给人看的原因」分开：那个只描述现象，
+# 这个决定行为（要不要继续留在候选池、要不要从列表里移除）。
+AVAIL_STATES = {
+    "available": "可用",
+    "unprobed": "未探测",
+    "unavailable": "模型不可用",
+    "region_limited": "地区受限",
+    "temporarily_broken": "临时故障",
+    "auth_failed": "鉴权失败",
+    "plan_limited": "不在套餐",
+    "inconclusive": "未能判定",
+}
+
+# 只有「网关明确拒绝路由」的证据才算模型不可用。
+# 判据是响应体里的原话，比 HTTP 码更可靠 —— 有些网关对不存在的模型返回 400/500。
+_UNROUTABLE_MARKERS = (
+    "model is unavailable", "model not found", "model_not_found",
+    "does not exist", "no such model", "unknown model",
+    "invalid model", "model not supported", "unsupported model",
+)
+_REGION_MARKERS = (
+    "region", "country", "territory", "not available in",
+    "unsupported country", "地区", "国家", "区域",
+)
+
+
+def classify_availability(code, status: str, detail: str = "") -> str:
+    """把一次探测结果归类成**决定行为**的判定（与 classify_probe_failure 分工）。
+
+    classify_probe_failure 只负责给人看一行原因；这个负责决定模型要不要继续
+    留在候选池。两者一起返回，互不替代。
+
+    分层原则（学自 dsh-our-free-model 的可用性设计）：
+
+    1. **只有「网关明确拒绝路由」才算模型不可用** —— 404/410，或响应体里出现
+       `Model is unavailable` / `model not found` 之类的原话。这类才该从列表移除。
+    2. **临时故障（5xx / 429 / 408 / 超时 / 断网）不属于对模型的判定** ——
+       一律保持可达。上游半夜抽风不该让模型从下拉框里消失。
+    3. **鉴权失败与套餐问题不是模型问题** —— 401 是 key 配错了，403 是没买那个档，
+       模型本身仍在那儿，改配置就能用。
+    4. 判不出来就是判不出来，返回 inconclusive，别硬猜。
+    """
+    if status == "ok":
+        return "available"
+    if status == "error":                     # 网络层：超时、断网、DNS、连接拒绝
+        return "temporarily_broken"
+    d = (detail or "").lower()
+
+    # ① 明确拒绝路由 → 模型不可用（优先于码判定，因为有些网关用 400/500 表达）
+    if any(mk in d for mk in _UNROUTABLE_MARKERS):
+        return "unavailable"
+    if code in (404, 410):
+        return "unavailable"
+
+    # ② 地区限制：403 的一个子类，但要看到地区相关字样才算
+    if code == 403 and any(mk in d for mk in _REGION_MARKERS):
+        return "region_limited"
+
+    # ③ 临时故障：限流、请求超时、上游故障
+    if code == 429 or code == 408:
+        return "temporarily_broken"
+    if code is not None and 500 <= code < 600:
+        return "temporarily_broken"
+
+    # ④ 鉴权 / 套餐 / 参数：模型本身没问题，是调用方配置
+    if code == 401:
+        return "auth_failed"
+    if code == 403:
+        return "plan_limited"
+    return "inconclusive"
+
+
 def build_stability_rows(model_stats: dict, allowed, health: dict) -> list:
     """把巡检统计拼成监控页「模型可用性」表格的行。
 
@@ -1745,6 +1845,15 @@ def build_stability_rows(model_stats: dict, allowed, health: dict) -> list:
             "last_reason": None if h.get("status") == "ok" else (
                 classify_probe_failure(h.get("code"), h.get("status", "unknown"), h.get("detail", ""))
                 if h else None),
+            # 判定层：决定这个模型要不要继续留在候选池（与 last_reason 分工，
+            # 那个给人看、这个给路由用）。
+            # 「还没探过」与「探过但判不出来」是两回事，必须分开 ——
+            # 前者只是还没轮到，后者是证据不足。混在一起会让用户误以为
+            # 一个从没探过的模型有问题。
+            # 注意别叫 availability —— 那个名字被「可用率百分比」占了。
+            "availability_state": (classify_availability(
+                h.get("code"), h.get("status", "unknown"), h.get("detail", ""))
+                if h and h.get("status") else "unprobed"),
             "vision": is_vision_model(model),
         })
     # 可用率高的在前；从未成功的（0%）沉到倒数第二档；本窗口还没巡检过的（None）垫底

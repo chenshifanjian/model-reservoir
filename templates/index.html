@@ -406,6 +406,21 @@ tbody tr:last-child td { border-bottom: none; }
   padding: 0 5px; line-height: 16px; border-radius: 4px; white-space: nowrap;
   border: 0.5px solid var(--mac-border);
 }
+/* 可用性判定徽章：后端 availability_state 是固定枚举串，不含上游原文，
+   插值到 class 与 title 都安全。颜色只表达「路由会怎么对待它」：
+   只有 unavailable 才会被自动路由跳过，其余都还在候选池里。 */
+.avail-chip {
+  font-size: 10px; font-weight: 600; margin-left: 4px;
+  padding: 1px 5px; border-radius: 4px; white-space: nowrap;
+  border: 0.5px solid transparent; letter-spacing: 0.2px;
+}
+.avail-chip.t-temporarily_broken { color: var(--warning); border-color: var(--warning); }
+.avail-chip.t-unavailable       { color: var(--danger);  border-color: var(--danger); }
+.avail-chip.t-auth_failed       { color: var(--warning); border-color: var(--mac-border); }
+.avail-chip.t-region_limited,
+.avail-chip.t-plan_limited,
+.avail-chip.t-inconclusive,
+.avail-chip.t-unprobed          { color: var(--text-secondary); border-color: var(--mac-border); }
 .model-provider-badge {
   font-size: 10px; font-weight: 600; color: #fff;
   background: var(--accent-primary); border: none;
@@ -1048,6 +1063,8 @@ td .sub-cell { font-size: 11px; color: var(--text-secondary); margin-top: 2px; }
       <label class="filter-field"><span class="filter-label">可用性</span>
         <select id="stableFilter" onchange="renderStability()">
           <option value="all">全部状态</option>
+          <option value="broken">有任何判定异常</option>
+          <option value="unroutable">仅被自动路由跳过</option>
           <option value="high">稳定（≥90%）</option>
           <option value="mid">存在波动（50%–90%）</option>
           <option value="low">服务异常（&lt;50%）</option>
@@ -2045,6 +2062,9 @@ function renderStability() {
   let filtered = stabilityData.filter(d => {
     if (provider !== 'all' && d.provider !== provider) return false;
     if (search && !d.model.toLowerCase().includes(search)) return false;
+    // 判定筛选：只看被自动路由跳过的（unavailable），或所有非正常的
+    if (filter === 'broken') return d.availability_state && d.availability_state !== 'available';
+    if (filter === 'unroutable') return d.availability_state === 'unavailable';
     if (filter === 'high') return d.availability >= 90;
     if (filter === 'mid') return d.availability >= 50 && d.availability < 90;
     if (filter === 'low') return d.availability < 50;
@@ -2089,13 +2109,32 @@ function renderStability() {
       ? `<span class="probe-reason" title="最近一次巡检失败原因">${d.last_reason}${d.last_code ? ' · ' + d.last_code : ''}</span>`
       : '';
 
+    // 可用性判定徽章。与「失败原因」分工：原因描述现象，判定决定路由行为。
+    // 关键区分：只有 unavailable 会被自动路由跳过，临时故障仍留在候选池 ——
+    // 上游半夜抽风不该让模型从可用列表里消失。
+    const AVAIL_LABEL = {
+      temporarily_broken: ['临时故障', '上游临时故障，仍保留在候选池里，会继续重试'],
+      unavailable:       ['模型不可用', '上游明确拒绝路由，自动跳过该模型'],
+      region_limited:    ['地区受限', '上游对该地区不放行，仍保留在候选池里'],
+      auth_failed:       ['鉴权失败', 'API Key 配置有问题，不是模型的问题'],
+      plan_limited:      ['不在套餐', '当前套餐不含该模型，不是模型的问题'],
+      inconclusive:      ['未能判定', '这次探测没拿到足够证据，仍保留在候选池里'],
+      unprobed:          ['未探测', '本时间窗口内还没轮到探测它，不算问题'],
+    };
+    const availChip = (() => {
+      const st = d.availability_state;
+      if (!st || st === 'available') return '';      // 可用不打徽章，免得每行都是噪音
+      const [label, hint] = AVAIL_LABEL[st] || [st, ''];
+      return `<span class="avail-chip t-${escHtml(st)}" title="${escHtml(hint)}">${escHtml(label)}</span>`;
+    })();
+
     return `<tr>
       <td>
         <div class="model-name" style="display: flex; align-items: center;">
           <span class="model-provider-badge">${d.provider}</span>
           <span>${d.model}</span>
           ${lastStatusHtml}
-          ${reasonChip}
+          ${reasonChip}${availChip}
         </div>
         ${descHtml}
       </td>

@@ -2,6 +2,7 @@ import pytest
 import json
 import sys
 import asyncio
+import time
 from pathlib import Path
 
 # 让测试能 import app
@@ -1157,3 +1158,169 @@ def test_available_models_empty_upstream(monkeypatch):
     import asyncio
     res = asyncio.run(app_module.get_available_models("P"))
     assert res["models"] == [] and res["free"] == {}
+
+
+# ============================================================
+# 可用性判定分层（学自 dsh-our-free-model 的可用性设计）
+#
+# 与 classify_probe_failure 的分工：那个只给人看一行原因，这个决定行为
+# （模型要不要继续留在候选池）。核心原则是「只有网关明确拒绝路由才算
+# 模型不可用」，临时故障一律保持可达。
+# ============================================================
+
+def test_availability_success():
+    assert app_module.classify_availability(200, "ok", "") == "available"
+
+
+def test_temporary_faults_stay_available():
+    """临时故障不得判为不可用：上游抽风不该让模型从候选池消失。"""
+    cases = [
+        (None, "error", "ReadTimeout", "超时"),
+        (None, "error", "Connection refused", "断网"),
+        (None, "error", "Name or service not known", "DNS 失败"),
+        (429, "fail", "rate limit exceeded", "限流"),
+        (408, "fail", "Request Timeout", "请求超时"),
+        (500, "fail", "Internal Server Error", "上游故障"),
+        (502, "fail", "Bad Gateway", "网关故障"),
+        (503, "fail", "Service Unavailable", "上游维护"),
+    ]
+    for code, st, detail, label in cases:
+        got = app_module.classify_availability(code, st, detail)
+        assert got == "temporarily_broken", f"{label} 应判为临时故障，实际 {got}"
+
+
+def test_only_explicit_rejection_counts_as_unavailable():
+    """只有「网关明确拒绝路由」才算模型不可用。"""
+    cases = [
+        (404, "fail", "Not Found"),
+        (410, "fail", "Gone"),
+        (400, "fail", "Model is unavailable"),
+        (400, "fail", "model_not_found"),
+        (500, "fail", "no such model"),           # 有些网关用 500 表达不存在
+        (400, "fail", "This model does not exist"),
+    ]
+    for code, st, detail in cases:
+        got = app_module.classify_availability(code, st, detail)
+        assert got == "unavailable", f"{detail!r} 应判为不可用，实际 {got}"
+
+
+def test_config_problems_are_not_model_problems():
+    """401 是 key 配错、403 是没买档，模型本身还在，改配置就能用。"""
+    assert app_module.classify_availability(401, "fail", "Invalid API key") == "auth_failed"
+    assert app_module.classify_availability(403, "fail", "no permission") == "plan_limited"
+
+
+def test_region_limit_is_its_own_bucket():
+    """地区限制单独一档，不与「套餐不够」混淆。"""
+    got = app_module.classify_availability(403, "fail", "not available in your region")
+    assert got == "region_limited", got
+    # 没有地区字样的 403 仍是套餐问题
+    assert app_module.classify_availability(403, "fail", "insufficient credits") == "plan_limited"
+
+
+def test_inconclusive_when_no_evidence():
+    """判不出来就判不出来，别硬猜。"""
+    assert app_module.classify_availability(400, "fail", "max_tokens too large") == "inconclusive"
+    assert app_module.classify_availability(418, "fail", "") == "inconclusive"
+
+
+def test_availability_states_all_have_chinese_label():
+    """判定值域必须每个都有中文标签，否则页面会漏字。"""
+    expected = {"available", "unprobed", "unavailable", "region_limited",
+                "temporarily_broken", "auth_failed", "plan_limited", "inconclusive"}
+    assert set(app_module.AVAIL_STATES) == expected
+    assert all(app_module.AVAIL_STATES[k] for k in expected)
+
+
+def test_stability_rows_carry_availability_state(monkeypatch):
+    """监控页每行都要带判定，且与 last_reason 同时存在、互不替代。"""
+    monkeypatch.setattr(app_module, "providers", [_prov(["m1"])])
+    rows = app_module.build_stability_rows(
+        {"P||m1": {"ok": 0, "fail": 1, "error": 0, "total": 1, "latencies": []}},
+        ["P||m1"],
+        {"P||m1": {"status": "fail", "code": 503, "detail": "Service Unavailable"}},
+    )
+    assert len(rows) == 1
+    r = rows[0]
+    assert r["availability_state"] == "temporarily_broken"
+    assert r["last_reason"] == "上游故障"          # 人看的原因仍在
+    assert r["availability"] == 0.0               # 可用率百分比字段没被覆盖
+
+
+def test_pick_keeps_temporarily_broken_in_pool(monkeypatch):
+    """临时故障的模型必须留在主候选池（tier 0），不能被降级。
+
+    注意 pick_available_models 返回的是 (provider 字典, 模型名)，不是 (名字, 模型名)。
+    """
+    monkeypatch.setattr(app_module, "providers", [_prov(["m1"])])
+    monkeypatch.setitem(app_module.health_status, "P||m1",
+                        {"status": "fail", "code": 503, "detail": "Service Unavailable"})
+    monkeypatch.setitem(app_module.circuit_breaker, "P||m1", {"fails": 0, "open_until": 0})
+    got = app_module.pick_available_models(None, False)
+    assert [m for _, m in got] == ["m1"], f"临时故障的模型被踢出候选池: {got}"
+
+
+def test_pick_skips_unavailable_when_healthy_exist(monkeypatch):
+    """自动路由时，有健康候选就别浪费尝试在已知不可用的模型上。
+
+    「不可用不消失」那条规则属于**模型列表 / UI 选择器**，不属于路由候选池：
+    路由该挑能用的去打，把 404 的模型排进候选只会白白烧一次请求。
+    """
+    monkeypatch.setattr(app_module, "providers", [_prov(["gone", "alive"])])
+    monkeypatch.setitem(app_module.health_status, "P||gone",
+                        {"status": "fail", "code": 404, "detail": "model_not_found"})
+    monkeypatch.setitem(app_module.health_status, "P||alive",
+                        {"status": "ok", "code": 200})
+    for k in ("P||gone", "P||alive"):
+        monkeypatch.setitem(app_module.circuit_breaker, k, {"fails": 0, "open_until": 0})
+    got = app_module.pick_available_models(None, False)
+    assert [m for _, m in got] == ["alive"], f"应跳过不可用模型: {got}"
+
+
+def test_pick_explicit_model_survives_bad_health(monkeypatch):
+    """显式点名某个模型时，即使它被判不可用也要返回它 —— 用户说了要它。
+
+    force/model 指定路径本来就绕过健康过滤（老行为），分层不该把它改坏。
+    """
+    monkeypatch.setattr(app_module, "providers", [_prov(["gone", "alive"])])
+    monkeypatch.setitem(app_module.health_status, "P||gone",
+                        {"status": "fail", "code": 404, "detail": "model_not_found"})
+    monkeypatch.setitem(app_module.circuit_breaker, "P||gone", {"fails": 0, "open_until": 0})
+    got = app_module.pick_available_models("P/gone", False)
+    assert [m for _, m in got] == ["gone"], f"显式点名的模型不该被过滤: {got}"
+
+
+def test_pick_never_returns_empty_when_anything_exists(monkeypatch):
+    """即使全部判为不可用，也不能返回空：空列表会让整轮请求直接失败。"""
+    monkeypatch.setattr(app_module, "providers", [_prov(["a", "b"])])
+    for m in ("a", "b"):
+        monkeypatch.setitem(app_module.health_status, f"P||{m}",
+                            {"status": "fail", "code": 404, "detail": "model_not_found"})
+        monkeypatch.setitem(app_module.circuit_breaker, f"P||{m}", {"fails": 0, "open_until": 0})
+    got = app_module.pick_available_models(None, False)
+    assert len(got) == 2, f"全部不可用时仍应有候选: {got}"
+
+
+def test_circuit_open_beats_probe_result(monkeypatch):
+    """熔断是运行时事实，比探测判定更实时：熔断中的模型仍要沉底。"""
+    monkeypatch.setattr(app_module, "providers", [_prov(["hot"])])
+    monkeypatch.setitem(app_module.health_status, "P||hot", {"status": "ok", "code": 200})
+    monkeypatch.setitem(app_module.circuit_breaker, "P||hot",
+                        {"fails": 5, "open_until": time.time() + 3600})
+    got = app_module.pick_available_models(None, False)
+    # 熔断中不该被当成可用，但仍应有候选（逐层回退）
+    assert len(got) == 1, got
+
+
+def test_unprobed_is_not_inconclusive():
+    """「还没探过」与「探过但判不出来」是两回事，混在一起会冤枉健康模型。
+
+    一个刚加进来、还没轮到探测的模型，不该显示成「未能判定」。
+    """
+    rows = app_module.build_stability_rows({}, ["P||fresh"], {})
+    assert rows[0]["availability_state"] == "unprobed", rows[0]
+    # 而探过但证据不足的是另一档
+    rows2 = app_module.build_stability_rows(
+        {"P||x": {"ok": 0, "fail": 1, "error": 0, "total": 1, "latencies": []}},
+        ["P||x"], {"P||x": {"status": "fail", "code": 400, "detail": "max_tokens too large"}})
+    assert rows2[0]["availability_state"] == "inconclusive", rows2[0]
