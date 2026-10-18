@@ -4,6 +4,7 @@ import time
 import os
 import logging
 import hashlib
+import hmac
 import socket
 import threading
 try:
@@ -259,7 +260,10 @@ def verify_admin(credentials: HTTPAuthorizationCredentials = Depends(security)):
     """管理面板调用 /api/* 的鉴权，直接使用 local_api_key"""
     if not credentials:
         raise HTTPException(status_code=401, detail="Missing credentials")
-    if credentials.credentials != LOCAL_API_KEY:
+    # 恒定时间比较：`!=` 会在首个不匹配字节处提前返回，攻击者据此逐字节
+    # 推测密钥（时序攻击）。本地 API 不经公网，但仍是同一台机器上的其他进程可打。
+    if not LOCAL_API_KEY or not hmac.compare_digest(
+            credentials.credentials.encode("utf-8"), LOCAL_API_KEY.encode("utf-8")):
         raise HTTPException(status_code=401, detail="Invalid API key")
     return credentials
 
