@@ -34,7 +34,10 @@ jobs:
       # 否则会出现「客户端加密、服务端验不过码」。服务端仓库：
       #   https://github.com/chenshifanjian/reservoir-team
       # 本工作流不含未受信输入，无命令注入面。
+      # Windows runner 的默认 shell 是 PowerShell，这里显式用 bash，
+      # 否则 `if ! diff ...` 会被当成 PowerShell 语法报错。
       - name: 协议一致性（与服务端仓库对比）
+        shell: bash
         run: |
           set -e
           echo "本仓库 protocol.py:"
