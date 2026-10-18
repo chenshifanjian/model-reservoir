@@ -55,6 +55,10 @@ MAX_PACKAGES_PER_MEMBER = 64      # 每个队员最多收多少密文包
 MAX_USAGE_BATCH = 200             # 单次上报用量条数上限
 MAX_NICKNAME_LEN = 32
 MAX_PROVIDER_NAME_LEN = 64
+MAX_MEMBERS_PER_TEAM = 32      # 单队成员上限（防无限加人堆数据）
+MAX_TEAMS_PER_IP_HOUR = 20     # 每 IP 每小时建队上限（防无限建队堆数据）
+TEAM_TTL_MIN = 300             # 最短 5 分钟（负数/0 会建出即过期的废队伍）
+TEAM_TTL_MAX = 30 * 86400      # 最长 30 天
 
 DB_LOCK = threading.Lock()
 
@@ -118,9 +122,14 @@ CREATE TABLE IF NOT EXISTS join_attempts (
     ip      TEXT NOT NULL,
     ts      REAL NOT NULL
 );
+CREATE TABLE IF NOT EXISTS create_attempts (
+    ip TEXT NOT NULL,
+    ts REAL NOT NULL
+);
 CREATE INDEX IF NOT EXISTS idx_pkg_target ON packages(team_id, target_client_id);
 CREATE INDEX IF NOT EXISTS idx_usage_team ON usage_log(team_id, client_id);
 CREATE INDEX IF NOT EXISTS idx_attempt ON join_attempts(team_id, ip, ts);
+CREATE INDEX IF NOT EXISTS idx_create ON create_attempts(ip, ts);
 """
 
 
@@ -156,6 +165,44 @@ class Store:
                 "DELETE FROM join_attempts WHERE ts < ?", (time.time() - 86400,)
             )
             self.conn.commit()
+
+    def check_create_limit(self, ip: str) -> bool:
+        """每 IP 每小时允许的建队次数。True = 放行。"""
+        now = time.time()
+        with DB_LOCK:
+            n = self.conn.execute(
+                "SELECT COUNT(*) c FROM create_attempts WHERE ip=? AND ts>?",
+                (ip, now - 3600),
+            ).fetchone()["c"]
+        return n < MAX_TEAMS_PER_IP_HOUR
+
+    def record_create(self, ip: str):
+        with DB_LOCK:
+            self.conn.execute(
+                "INSERT INTO create_attempts(ip, ts) VALUES(?,?)", (ip, time.time()))
+            self.conn.execute(
+                "DELETE FROM create_attempts WHERE ts < ?", (time.time() - 86400,))
+            self.conn.commit()
+
+    def count_members(self, team_id: str) -> int:
+        return self.conn.execute(
+            "SELECT COUNT(*) c FROM members WHERE team_id=?", (team_id,)).fetchone()["c"]
+
+    def purge_expired(self):
+        """删掉过期队伍及其成员/密文包/用量。过期数据不清理会让数据库无限增长，
+        也让「7 天 TTL 防离线枚举」失效（拿得到 db 文件就仍能离线破解）。"""
+        now = time.time()
+        with DB_LOCK:
+            ids = [r["team_id"] for r in self.conn.execute(
+                "SELECT team_id FROM teams WHERE expires_at < ?", (now,)).fetchall()]
+            for tid in ids:
+                self.conn.execute("DELETE FROM members WHERE team_id=?", (tid,))
+                self.conn.execute("DELETE FROM packages WHERE team_id=?", (tid,))
+                self.conn.execute("DELETE FROM usage_log WHERE team_id=?", (tid,))
+                self.conn.execute("DELETE FROM teams WHERE team_id=?", (tid,))
+            if ids:
+                self.conn.commit()
+        return len(ids)
 
     def clear_attempts(self, team_id: str, ip: str):
         with DB_LOCK:
@@ -425,15 +472,28 @@ class Handler(BaseHTTPRequestHandler):
 
         # ---- /api/teams  建队 ----
         if parts == ["api", "teams"]:
+            if not self.STORE().check_create_limit(ip):
+                _send(self, 429, {"ok": False, "error": "too_many_teams",
+                                  "retry_after": 3600})
+                return
             team_id = secrets.token_hex(16)
             captain_client_id = str(body.get("captain_client_id") or "").strip()
             code_hash = str(body.get("code_hash") or "").strip()
             code_salt = str(body.get("code_salt") or "").strip()
-            ttl = min(int(body.get("ttl") or CODE_TTL_DEFAULT), 30 * 86400)
+            # ttl 必须是合法整数且落在区间内。
+            # 直接 int() 会让 "abc" 抛 ValueError → 连接被掐断（RemoteDisconnected）；
+            # 负数则建出即过期的废队伍。
+            try:
+                ttl = int(body.get("ttl") or CODE_TTL_DEFAULT)
+            except (TypeError, ValueError):
+                _send(self, 400, {"ok": False, "error": "bad_request"})
+                return
+            ttl = max(TEAM_TTL_MIN, min(ttl, TEAM_TTL_MAX))
             nickname = str(body.get("nickname") or "队长")[:MAX_NICKNAME_LEN]
             if not captain_client_id or len(code_hash) != 64 or len(code_salt) != 64:
                 _send(self, 400, {"ok": False, "error": "bad_request"})
                 return
+            self.STORE().record_create(ip)
             token = secrets.token_urlsafe(32)
             self.STORE().create_team(team_id, captain_client_id, code_hash, code_salt, ttl)
             self.STORE().add_member(team_id, captain_client_id, nickname, "captain",
@@ -468,19 +528,29 @@ class Handler(BaseHTTPRequestHandler):
                 return
 
             self.STORE().clear_attempts(team_id, ip)
+
+            # 安全关键：join 只做「新成员加入」，绝不允许已存在的 client_id 重新认证。
+            #
+            # 为什么：client_id 是公开的（list_members 返回给每个成员），
+            # 而 join 只验证组队码 —— 码恰恰是要分享给队员的。
+            # 若允许重复 join，任何知道码的队员都能拿队长的 client_id 冒名顶替：
+            # 走 add_member(..., "member", "approved", 新token) 会把队长 role 降级成 member
+            # 并换掉其 token → 队长被踢出自己的队伍，队伍失去管理员。
+            # 已成员应使用各自持久化的 team.json 里的 token 调其它端点。
             existing = self.STORE().get_member(team_id, client_id)
             if existing and existing["status"] == "kicked":
                 _send(self, 403, {"ok": False, "error": "kicked"})
                 return
+            if existing:
+                _send(self, 409, {"ok": False, "error": "already_member"})
+                return
+            if self.STORE().count_members(team_id) >= MAX_MEMBERS_PER_TEAM:
+                _send(self, 409, {"ok": False, "error": "team_full"})
+                return
             token = secrets.token_urlsafe(32)
-            if existing and existing["status"] == "approved":
-                # 已入过队（重新连上）：换新 token，状态不变
-                self.STORE().add_member(team_id, client_id, nickname or existing["nickname"],
-                                      "member", "approved", hash_token(token))
-            else:
-                self.STORE().add_member(team_id, client_id, nickname, "member",
-                                      "pending", hash_token(token))
-                existing = self.STORE().get_member(team_id, client_id)
+            self.STORE().add_member(team_id, client_id, nickname, "member",
+                                  "pending", hash_token(token))
+            existing = self.STORE().get_member(team_id, client_id)
             # code_salt 必须返回：队员要用它 + code 派生 K_team。
             # salt 不是秘密（服务端本来就存着），返回无害；秘密只有 code 本身。
             _send(self, 200, {"ok": True, "team_id": team_id, "token": token,
@@ -623,6 +693,27 @@ def main():
     global _store
     _store = Store(db_path)
     store = _store
+
+    # 启动时先清一次，之后每小时清一次过期队伍。
+    # 不清理的话：数据库无限增长；且「7 天 TTL 防离线枚举」失效 ——
+    # 过期队伍的 code_hash 仍在库里，拿到 db 文件依然能离线破解。
+    purged = store.purge_expired()
+    if purged:
+        sys.stderr.write("启动清理：删除过期队伍 %d 个\n" % purged)
+
+    def _purge_loop():
+        while True:
+            time.sleep(3600)
+            try:
+                n = store.purge_expired()
+                if n:
+                    sys.stderr.write("定期清理：删除过期队伍 %d 个\n" % n)
+                    sys.stderr.flush()
+            except Exception as exc:          # 清理失败不能拖垮服务
+                sys.stderr.write("清理失败: %r\n" % (exc,))
+                sys.stderr.flush()
+
+    threading.Thread(target=_purge_loop, daemon=True).start()
 
     srv = ThreadingHTTPServer(("127.0.0.1", port), Handler)
     srv.daemon_threads = True

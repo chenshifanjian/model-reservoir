@@ -203,7 +203,19 @@ async def join_team(state: TeamState, team_id: str, code: str, nickname: str = "
         "client_id": state.client_id, "nickname": nickname or "队员",
     })
     if not d.get("ok"):
-        return {"ok": False, "error": d.get("error", "入队失败"), "http": d.get("_http")}
+        # 服务端把「已存在的 client_id 再次 join」判为 409 —— 这是安全设计：
+        # 不允许重复 join，否则知道组队码的人可用队长的 client_id 冒名顶替。
+        # 已成员应该用本地 team.json 里已有的 token，而不是重新入队。
+        err = d.get("error") or "入队失败"
+        shown = {
+            "already_member": "你已经是这个队伍的成员了，无需重复入队",
+            "team_full": "队伍已满",
+            "kicked": "你已被队长移出该队伍",
+            "wrong_code": "组队码不对",
+            "too_many_attempts": "错码次数过多，请稍后再试",
+            "team_unavailable": "队伍已关闭或已过期",
+        }.get(err, err)
+        return {"ok": False, "error": shown, "http": d.get("_http"), "code": err}
     state.put_team(team_id, {
         "role": "member", "token": d["token"], "code": code,
         "code_salt": d.get("code_salt", ""), "nickname": nickname or "队员",
