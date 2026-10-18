@@ -1,8 +1,71 @@
 {
-  "version": "2026-07-21",
-  "updated_at": "2026-07-21",
+  "version": "2026-10-19",
+  "updated_at": "2026-10-19",
   "doc_url": "https://pv284bk9no6.feishu.cn/wiki/HCOuwXuZGibDUGkWLlpcQuiLnDf",
   "platforms": {
+    "Ollama": {
+      "base_url": "http://127.0.0.1:11434/v1",
+      "free_only": false,
+      "needs_key": false,
+      "free_quota": "无限（吃本机算力）",
+      "key_page_url": "https://ollama.com/download",
+      "auth_hint": "无需 Key，先装 Ollama",
+      "models": []
+    },
+    "LM Studio": {
+      "base_url": "http://127.0.0.1:1234/v1",
+      "free_only": false,
+      "needs_key": false,
+      "free_quota": "无限（吃本机算力）",
+      "key_page_url": "https://lmstudio.ai/download",
+      "auth_hint": "无需 Key，先装 LM Studio 并开启本地服务",
+      "models": []
+    },
+    "OpenRouter": {
+      "base_url": "https://openrouter.ai/api/v1",
+      "free_only": false,
+      "needs_key": true,
+      "free_quota": "免费模型带 :free 后缀，约 20 请求/分、50 请求/天",
+      "key_page_url": "https://openrouter.ai/keys",
+      "auth_hint": "免费注册，不绑卡",
+      "models": []
+    },
+    "Groq": {
+      "base_url": "https://api.groq.com/openai/v1",
+      "free_only": false,
+      "needs_key": true,
+      "free_quota": "约 30 请求/分，推理速度极快",
+      "key_page_url": "https://console.groq.com/keys",
+      "auth_hint": "免费注册，不绑卡",
+      "models": []
+    },
+    "Cerebras": {
+      "base_url": "https://api.cerebras.ai/v1",
+      "free_only": false,
+      "needs_key": true,
+      "free_quota": "约 100 万 token/天（目录波动大，别硬编码模型名）",
+      "key_page_url": "https://cloud.cerebras.ai/",
+      "auth_hint": "免费注册，不绑卡",
+      "models": []
+    },
+    "Google Gemini": {
+      "base_url": "https://generativelanguage.googleapis.com/v1beta/openai/",
+      "free_only": false,
+      "needs_key": true,
+      "free_quota": "约 1500 请求/天（AI Studio 免费档）",
+      "key_page_url": "https://aistudio.google.com/apikey",
+      "auth_hint": "免费注册，不绑卡",
+      "models": []
+    },
+    "GitHub Models": {
+      "base_url": "https://models.inference.ai.azure.com",
+      "free_only": false,
+      "needs_key": true,
+      "free_quota": "约 15 请求/分、150 请求/天",
+      "key_page_url": "https://github.com/marketplace/models",
+      "auth_hint": "用 GitHub 账号换 Token",
+      "models": []
+    },
     "NVIDIA": {
       "base_url": "https://integrate.api.nvidia.com/v1",
       "free_only": true,
@@ -21,7 +84,9 @@
         "meta/llama-3.2-11b-vision-instruct",
         "nvidia/nemotron-nano-12b-v2-vl",
         "nvidia/llama-3.1-nemotron-nano-vl-8b-v1"
-      ]
+      ],
+      "needs_key": true,
+      "free_quota": "免费档（2026-07-23 实测模型列表全空，疑似活动已结束，配前先测）"
     },
     "SenseNova": {
       "base_url": "https://token.sensenova.cn/v1",
@@ -32,7 +97,9 @@
         "deepseek-v4-flash",
         "glm-5.2",
         "sensenova-6.7-flash-lite"
-      ]
+      ],
+      "needs_key": true,
+      "free_quota": "需手机号注册，有免费额度"
     },
     "魔搭": {
       "base_url": "https://api-inference.modelscope.cn/v1",
@@ -48,7 +115,9 @@
         "Qwen/Qwen3-VL-8B-Thinking",
         "Qwen/Qwen3-VL-8B-Instruct",
         "PaddlePaddle/ERNIE-4.5-VL-28B-A3B-PT"
-      ]
+      ],
+      "needs_key": true,
+      "free_quota": "部分模型免费，需阿里云账号（支付宝实名）"
     }
   },
   "routers": {

@@ -3447,29 +3447,69 @@ async function openPresetModal() {
 function renderPresetCards(preset) {
   const body = document.getElementById('presetBody');
   const existingNames = new Set(_existingProviders.map(p => p.name));
+
+  // 按「要不要 Key」分组：免 key 的（本机推理）是零门槛入口，开箱即用；
+  // 要 key 的都是免费注册、不绑卡，但得先去官网拿。
+  // 严格判断，老预设里没有 needs_key 字段的归到「要 key」组。
+  const entries = Object.entries(preset.platforms);
+  const noKey = entries.filter(function (e) { return e[1].needs_key === false; });
+  const withKey = entries.filter(function (e) { return e[1].needs_key !== false; });
+
   let html = '<div class="preset-intro preset-notice">已配置的平台可留空 Key 保留原配置；填入新 Key 会覆盖旧配置。</div>';
   html += '<div class="preset-warn" id="presetWarn"></div>';
-  html += '<div class="preset-cards">';
-  for (const [name, cfg] of Object.entries(preset.platforms)) {
-    const hasExisting = existingNames.has(name);
-    const badge = hasExisting ? '<span class="preset-card-badge" style="color:var(--success);">已有配置</span>' : '<span class="preset-card-badge">' + (cfg.auth_hint || '无需认证') + '</span>';
-    const placeholder = hasExisting ? '留空保留原配置，或填入新 Key 覆盖' : '填入 ' + name + ' 的 API Key';
-    html += '<div class="preset-card">';
-    html += '<div class="preset-card-head">';
-    html += '<span class="preset-card-name">' + name + '</span>';
-    html += badge;
-    html += '</div>';
-    html += '<div class="preset-card-row">';
-    html += '<input type="password" class="preset-key-input" id="preset_key_' + name + '" placeholder="' + placeholder + '" oninput="resetPresetKeyStatus(\'' + name + '\')">';
-    html += '<button class="btn" style="padding:4px 10px;font-size:12px;" onclick="verifyPresetKey(\'' + name + '\')">测试</button>';
-    html += '<button class="btn" style="padding:4px 10px;font-size:12px;" onclick="openPresetKeyPage(\'' + name + '\')">官网</button>';
-    html += '</div>';
-    html += '<div class="preset-card-status" id="preset_status_' + name + '"></div>';
-    html += '</div>';
+
+  function section(title, hint, list) {
+    if (!list.length) return '';
+    let h = '<div style="margin:14px 0 8px;font-weight:600;">' + escHtml(title) +
+            '<span style="font-weight:400;color:var(--text-secondary);font-size:12px;margin-left:8px;">' + escHtml(hint) + '</span></div>';
+    h += '<div class="preset-cards">';
+    for (let i = 0; i < list.length; i++) h += presetCard(list[i][0], list[i][1], existingNames);
+    h += '</div>';
+    return h;
   }
-  html += '</div>';
+
+  html += section('免 Key，开箱即用', '本机推理服务，装好即可用', noKey);
+  html += section('免费注册拿 Key', '都不绑卡，点「官网」去申请', withKey);
   body.innerHTML = html;
   updatePresetApplyBtn();
+}
+
+function presetCard(name, cfg, existingNames) {
+  const hasExisting = existingNames.has(name);
+  const noKey = cfg.needs_key === false;
+  // 元素 id 用**原始** name：verifyPresetKey() 里是
+  // getElementById('preset_key_' + name) 用原始名查找，两边必须一致。
+  // escHtml 只用于可见文本与属性值。
+  const rawId = name;
+  const nm = escHtml(name);
+
+  let badge;
+  if (hasExisting) badge = '<span class="preset-card-badge" style="color:var(--success);">已有配置</span>';
+  else if (noKey)   badge = '<span class="preset-card-badge" style="color:var(--success);">无需 Key</span>';
+  else              badge = '<span class="preset-card-badge">' + escHtml(cfg.auth_hint || '需 Key') + '</span>';
+
+  let h = '<div class="preset-card">';
+  h += '<div class="preset-card-head"><span class="preset-card-name">' + nm + '</span>' + badge + '</div>';
+
+  // 免费额度写在卡片上：光说「免费」不给额度，用户没法判断够不够用
+  if (cfg.free_quota) {
+    h += '<div style="font-size:11px;color:var(--text-secondary);margin:2px 0 6px;">' + escHtml(cfg.free_quota) + '</div>';
+  }
+
+  if (noKey) {
+    // 免 key 的不给输入框：给了反而让人以为要填点什么
+    h += '<div class="preset-card-row" style="font-size:12px;color:var(--text-secondary);">无需填 Key，确保本机服务已启动即可</div>';
+  } else {
+    const placeholder = hasExisting ? '留空保留原配置，或填入新 Key 覆盖' : ('填入 ' + name + ' 的 API Key');
+    h += '<div class="preset-card-row">';
+    h += '<input type="password" class="preset-key-input" id="preset_key_' + rawId + '" placeholder="' + escHtml(placeholder) + '" oninput="resetPresetKeyStatus(\'' + rawId + '\')">';
+    h += '<button class="btn" style="padding:4px 10px;font-size:12px;" onclick="verifyPresetKey(\'' + rawId + '\')">测试</button>';
+    h += '<button class="btn" style="padding:4px 10px;font-size:12px;" onclick="openPresetKeyPage(\'' + rawId + '\')">官网</button>';
+    h += '</div>';
+  }
+  h += '<div class="preset-card-status" id="preset_status_' + rawId + '"></div>';
+  h += '</div>';
+  return h;
 }
 
 function resetPresetKeyStatus(name) {
@@ -3504,6 +3544,14 @@ function openPresetKeyPage(name) {
   if (cfg && cfg.key_page_url) apiFetch('/api/open-url', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ url: cfg.key_page_url }) });
 }
 
+// 免 Key 平台（needs_key===false，本机推理）没有 Key 输入框，
+// 判断「缺不缺 Key」时必须先排除它们，否则它们永远进 missing，
+// 而 missing 非空会让整条一键配置流程直接 return —— 一个平台都配不成。
+function presetNeedsKey(name) {
+  const cfg = _presetData && _presetData.platforms && _presetData.platforms[name];
+  return !(cfg && cfg.needs_key === false);
+}
+
 function updatePresetApplyBtn() {
   const btn = document.getElementById('presetApplyBtn');
   const warn = document.getElementById('presetWarn');
@@ -3512,11 +3560,15 @@ function updatePresetApplyBtn() {
   const existingNames = new Set(_existingProviders.map(p => p.name));
   // 没填 Key 且也没已有配置的平台 → 缺失
   const missing = names.filter(name => {
+    if (!presetNeedsKey(name)) return false;   // 免 Key 的不算缺失
     const el = document.getElementById('preset_key_' + name);
     return (!el || !el.value.trim()) && !existingNames.has(name);
   });
-  btn.disabled = missing.length > 0;
-  if (warn) warn.textContent = missing.length ? '以下平台尚未配置，请填写 Key：' + missing.join('、') : '';
+  // 缺 Key 只提示、不禁用：留空的平台跳过，其余（含全部免 Key 平台）照常配置。
+  // 一道「必须填全才让提交」的闸门会让新增的免 Key 平台形同虚设 ——
+  // 卡片摆着却永远配不上，正是「无效控件比不提供更糟」。
+  btn.disabled = false;
+  if (warn) warn.textContent = missing.length ? '未填 Key 的平台将跳过：' + missing.join('、') : '';
 }
 
 async function applyPreset() {
@@ -3533,12 +3585,14 @@ async function applyPreset() {
       keys[name] = v;
       if (existingNames.has(name)) willOverwrite.push(name);
     } else {
-      if (!existingNames.has(name)) missing.push(name);
+      // 免 Key 平台没有输入框（el 为 null），不算缺失 —— 后端会直接用空 Key
+      // 去探测本机服务并添加，不需要用户填任何东西。
+      if (presetNeedsKey(name) && !existingNames.has(name)) missing.push(name);
     }
   }
+  // 缺 Key 不阻断，改为跳过并明确点名（结果 toast 里也会逐平台列出失败项）。
   if (missing.length) {
-    showToast('以下平台尚未配置，请填写 Key：' + missing.join('、'), 'warn');
-    return;
+    showToast('以下平台未填 Key，将跳过：' + missing.join('、'), 'warn');
   }
   // 有覆盖操作时弹确认框
   if (willOverwrite.length) {

@@ -2466,7 +2466,13 @@ async def apply_preset(data: PresetApplyIn, _=Depends(verify_admin)):
             existing_names = {p["name"] for p in providers}
             for plat_name, plat_cfg in platforms.items():
                 key = (keys.get(plat_name) or "").strip()
-                if not key:
+                # needs_key=False 的平台（Ollama / LM Studio 这类本机推理）压根没有
+                # Key 输入框，keys 里自然不存在它。若沿用下面的老逻辑，会一律落到
+                # 「未填写 Key」被跳过 —— 卡片摆在那却永远配不上，正是无效控件。
+                # 所以这类平台跳过 Key 校验，直接用空 Key 走探测（空 Key 对
+                # 本机推理服务是正确的，转发时 header 就是 Bearer 空值）。
+                no_key_needed = plat_cfg.get("needs_key") is False
+                if not key and not no_key_needed:
                     if plat_name in existing_names:
                         existing = next((p for p in providers if p["name"] == plat_name), None)
                         if existing and existing.get("api_key"):
@@ -2659,14 +2665,86 @@ PRESET_DOC_URL = "https://pv284bk9no6.feishu.cn/wiki/HCOuwXuZGibDUGkWLlpcQuiLnDf
 PRESET_CACHE_TTL = 300
 
 # 内置兜底预设（断网保底；平台变更时改远端 presets.json 热更新即可，无需重新打包）
+# 内置预设的两个补充字段（免费档接入）：
+#   needs_key   False = 免 key，本机推理服务，开箱即用；True = 要免费注册拿 key（不绑卡）
+#   free_quota  人话描述免费额度。**不硬编码模型名** —— Cerebras 曾从十几个模型
+#               掉到 2 个，目录波动是免费档常态，写死模型名会立刻失效
 BUILTIN_PRESET = {
-    "version": "2026-07-20",
-    "updated_at": "2026-07-20",
+    "version": "2026-10-19",
+    "updated_at": "2026-10-19",
     "doc_url": PRESET_DOC_URL,
     "platforms": {
+        # ---- 免 key：本机推理，开箱即用 ----
+        "Ollama": {
+            "base_url": "http://127.0.0.1:11434/v1",
+            "free_only": False,
+            "needs_key": False,
+            "free_quota": "无限（吃本机算力）",
+            "key_page_url": "https://ollama.com/download",
+            "auth_hint": "无需 Key，先装 Ollama",
+            "models": [],
+        },
+        "LM Studio": {
+            "base_url": "http://127.0.0.1:1234/v1",
+            "free_only": False,
+            "needs_key": False,
+            "free_quota": "无限（吃本机算力）",
+            "key_page_url": "https://lmstudio.ai/download",
+            "auth_hint": "无需 Key，先装 LM Studio 并开启本地服务",
+            "models": [],
+        },
+        # ---- 免费注册拿 key（都不绑卡）----
+        "OpenRouter": {
+            "base_url": "https://openrouter.ai/api/v1",
+            "free_only": False,
+            "needs_key": True,
+            "free_quota": "免费模型带 :free 后缀，约 20 请求/分、50 请求/天",
+            "key_page_url": "https://openrouter.ai/keys",
+            "auth_hint": "免费注册，不绑卡",
+            "models": [],
+        },
+        "Groq": {
+            "base_url": "https://api.groq.com/openai/v1",
+            "free_only": False,
+            "needs_key": True,
+            "free_quota": "约 30 请求/分，推理速度极快",
+            "key_page_url": "https://console.groq.com/keys",
+            "auth_hint": "免费注册，不绑卡",
+            "models": [],
+        },
+        "Cerebras": {
+            "base_url": "https://api.cerebras.ai/v1",
+            "free_only": False,
+            "needs_key": True,
+            "free_quota": "约 100 万 token/天（目录波动大，别硬编码模型名）",
+            "key_page_url": "https://cloud.cerebras.ai/",
+            "auth_hint": "免费注册，不绑卡",
+            "models": [],
+        },
+        "Google Gemini": {
+            "base_url": "https://generativelanguage.googleapis.com/v1beta/openai/",
+            "free_only": False,
+            "needs_key": True,
+            "free_quota": "约 1500 请求/天（AI Studio 免费档）",
+            "key_page_url": "https://aistudio.google.com/apikey",
+            "auth_hint": "免费注册，不绑卡",
+            "models": [],
+        },
+        "GitHub Models": {
+            "base_url": "https://models.inference.ai.azure.com",
+            "free_only": False,
+            "needs_key": True,
+            "free_quota": "约 15 请求/分、150 请求/天",
+            "key_page_url": "https://github.com/marketplace/models",
+            "auth_hint": "用 GitHub 账号换 Token",
+            "models": [],
+        },
+        # ---- 原有三个 ----
         "NVIDIA": {
             "base_url": "https://integrate.api.nvidia.com/v1",
             "free_only": True,
+            "needs_key": True,
+            "free_quota": "免费档（2026-07-23 实测模型列表全空，疑似活动已结束，配前先测）",
             "key_page_url": "https://build.nvidia.com/",
             "auth_hint": "需绑定手机号",
             "models_visible": [
@@ -2687,6 +2765,8 @@ BUILTIN_PRESET = {
         "SenseNova": {
             "base_url": "https://token.sensenova.cn/v1",
             "free_only": False,
+            "needs_key": True,
+            "free_quota": "需手机号注册，有免费额度",
             "key_page_url": "https://platform.sensenova.cn/console/keys",
             "auth_hint": "手机号注册登录即可",
             "models_visible": [
@@ -2698,6 +2778,8 @@ BUILTIN_PRESET = {
         "魔搭": {
             "base_url": "https://api-inference.modelscope.cn/v1",
             "free_only": False,
+            "needs_key": True,
+            "free_quota": "部分模型免费，需阿里云账号（支付宝实名）",
             "key_page_url": "https://modelscope.cn/my/myaccesstoken",
             "auth_hint": "需绑定阿里云账号（支付宝实名）",
             "models_visible": [
