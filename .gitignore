@@ -5,6 +5,7 @@ history.jsonl
 usage.jsonl
 announcement_cache.json
 announcement.json
+pricing_cache.json
 routers.json
 
 # Python
