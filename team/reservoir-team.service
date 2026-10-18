@@ -1,11 +1,12 @@
 # 组队协调服务 · systemd 单元
 #
-# 部署位置：阿里云 123.57.133.217
+# 部署位置：任意一台你自己的 Linux（本项目开发时用的是 2 核 / 可用内存约 505MiB
+# 的低配 VPS，所以下面的约束按「小内存机器也能稳」来写）
 #   1) 本文件 → /etc/systemd/system/reservoir-team.service
 #   2) coordinator.py → /opt/reservoir-team/coordinator.py
 #   3) systemctl daemon-reload && systemctl enable --now reservoir-team
 #
-# 内存约束：那台机只有 ~505Mi 可用，所以
+# 内存约束：小内存机器上，所以
 #   - 不用 Docker（Docker 本身吃内存）
 #   - 不用 fastapi/uvicorn（要装包，且常驻内存更大）
 #   - 直接跑标准库 HTTP server；下面 MemoryMax 是硬保险，超了会被 OOM 杀掉重启，

@@ -968,7 +968,7 @@ def test_is_local_base_url():
     for u in ("http://127.0.0.1:8000", "http://localhost/v1", "http://192.168.1.5:9000",
               "http://10.1.2.3", "http://172.16.0.9", "http://172.31.255.1", "http://nas.local"):
         assert app_module.is_local_base_url(u) is True, u
-    for u in ("https://api.deepseek.com", "https://model-llm.heilongxiake.cn/",
+    for u in ("https://api.deepseek.com", "https://llm.example.com/",
               "http://172.32.0.1", "https://integrate.api.nvidia.com/v1"):
         assert app_module.is_local_base_url(u) is False, u
 
