@@ -37,16 +37,22 @@ jobs:
       # Windows runner 的默认 shell 是 PowerShell，这里显式用 bash，
       # 否则 `if ! diff ...` 会被当成 PowerShell 语法报错。
       - name: 协议一致性（与服务端仓库对比）
+        if: runner.os == 'Linux'
         shell: bash
         run: |
           set -e
-          echo "本仓库 protocol.py:"
-          sha256sum protocol.py
+          # 比对前统一去掉 \r：Windows runner 的 checkout 可能把 LF 转成 CRLF，
+          # 而 raw.githubusercontent 下载的永远是 LF，直接 diff 会全文报不一致。
+          norm() { tr -d '\r' < "$1" | sha256sum | cut -d' ' -f1; }
           curl -fsSL -o /tmp/server_protocol.py \
             https://raw.githubusercontent.com/chenshifanjian/reservoir-team/main/protocol.py
-          if ! diff -q protocol.py /tmp/server_protocol.py > /dev/null; then
+          a=$(norm protocol.py)
+          b=$(norm /tmp/server_protocol.py)
+          echo "本仓库（归一化后）: $a"
+          echo "服务端（归一化后）: $b"
+          if [ "$a" != "$b" ]; then
             echo "::error::protocol.py 与服务端仓库不一致（协议漂移）。改协议必须两边同时改。"
-            diff protocol.py /tmp/server_protocol.py || true
+            diff <(tr -d '\r' < protocol.py) <(tr -d '\r' < /tmp/server_protocol.py) || true
             exit 1
           fi
           echo "protocol.py 与服务端仓库一致"
