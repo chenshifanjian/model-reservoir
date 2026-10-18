@@ -67,6 +67,22 @@ DB_LOCK = threading.Lock()
 _store: "Store | None" = None
 
 
+# 组队码的合法形态：6 位数字，或 8 位高熵码（与 team_client 的字母表一致，
+# 去掉易混的 0/O/1/I）。长度上限挡的是畸形输入 —— 真正的安全来自 scrypt 比对。
+CODE_LEN_6 = 6
+CODE_LEN_8 = 8
+CODE_ALPHABET_8 = set("23456789ABCDEFGHJKLMNPQRSTUVWXYZ")
+
+
+def _valid_code(code: str) -> bool:
+    """入队码形态校验。"""
+    if len(code) == CODE_LEN_6:
+        return code.isdigit()
+    if len(code) == CODE_LEN_8:
+        return all(c in CODE_ALPHABET_8 for c in code)
+    return False
+
+
 def scrypt_key(password: str, salt_hex: str) -> str:
     """入队码校验摘要。服务端只存这个，从不持有明文码 → 也派生不出队伍密钥。"""
     return _protocol_code_hash(password, salt_hex)
@@ -508,7 +524,10 @@ class Handler(BaseHTTPRequestHandler):
             team_id = str(body.get("team_id") or "").strip()
             client_id = str(body.get("client_id") or "").strip()
             nickname = str(body.get("nickname") or "队员")[:MAX_NICKNAME_LEN]
-            if not (code.isdigit() and team_id and client_id):
+            # 码的形态：6 位数字（低熵档）或 8 位高熵码（32 字母表去易混字符）。
+            # 以前只认 isdigit()，把客户端已有的 8 位高熵码模式整个废掉了
+            # —— 队长能建队但队员永远进不来（400）。
+            if not (team_id and client_id and _valid_code(code)):
                 _send(self, 400, {"ok": False, "error": "bad_request"})
                 return
 

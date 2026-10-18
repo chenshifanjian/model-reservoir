@@ -1206,7 +1206,7 @@ td .sub-cell { font-size: 11px; color: var(--text-secondary); margin-top: 2px; }
         <div class="section-head" style="margin-top:0;"><h3 class="section-title">加入已有队伍</h3></div>
         <div style="display:flex; gap:8px; flex-wrap:wrap; align-items:center;">
           <input type="text" id="joinTeamId" placeholder="队伍 ID（队长给你的那串）" style="flex:2; min-width:200px; padding:7px 10px; border-radius:6px; border:1px solid var(--mac-border); background:transparent; color:var(--text-primary); font-size:13px; outline:none;">
-          <input type="text" id="joinCode" placeholder="6 位组队码" maxlength="8" style="flex:1; min-width:110px; padding:7px 10px; border-radius:6px; border:1px solid var(--mac-border); background:transparent; color:var(--text-primary); font-size:13px; outline:none; letter-spacing:2px;">
+          <input type="text" id="joinCode" placeholder="组队码" maxlength="8" autocapitalize="characters" spellcheck="false" style="flex:1; min-width:110px; padding:7px 10px; border-radius:6px; border:1px solid var(--mac-border); background:transparent; color:var(--text-primary); font-size:13px; outline:none; letter-spacing:2px;">
           <input type="text" id="joinNick" placeholder="你的队内昵称" style="flex:1; min-width:110px; padding:7px 10px; border-radius:6px; border:1px solid var(--mac-border); background:transparent; color:var(--text-primary); font-size:13px; outline:none;">
           <button class="btn btn-primary" onclick="teamJoinSubmit()">入队</button>
         </div>
@@ -2922,7 +2922,9 @@ function teamShowJoin() {
 
 async function teamJoinSubmit() {
   const teamId = document.getElementById('joinTeamId').value.trim();
-  const code = document.getElementById('joinCode').value.trim();
+  // 8 位高熵码的字母表是纯大写（去掉了易混的 0/O/1/I），桌面 WebKitGTK 不吃
+  // autocapitalize，所以这里统一转大写，免得用户小写输入被判成错码。
+  const code = document.getElementById('joinCode').value.trim().toUpperCase();
   const nick = document.getElementById('joinNick').value.trim() || '队员';
   if (!teamId || !code) { teamMsg('teamJoinMsg', '队伍 ID 和组队码都不能为空', true); return; }
   teamMsg('teamJoinMsg', '提交中…', false);

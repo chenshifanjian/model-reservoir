@@ -59,6 +59,12 @@ class TeamState:
     def save(self):
         tmp = self.path.with_suffix(".json.tmp")
         tmp.write_text(json.dumps(self._data, ensure_ascii=False, indent=2), encoding="utf-8")
+        # 这个文件里有组队码与成员 token —— 明文，能直接派生 K_team。
+        # 默认 umask 写出来是 0644，同机低权账户可读。改成仅属主可读写。
+        try:
+            tmp.chmod(0o600)
+        except OSError:
+            pass            # 某些文件系统不支持 chmod，不因此让保存失败
         tmp.replace(self.path)
 
     # ---------- 本地身份 ----------
@@ -120,11 +126,17 @@ async def _req(state: TeamState, method: str, path: str, body: dict | None = Non
 # 队长侧
 # ============================================================
 async def create_team(state: TeamState, nickname: str = "队长", ttl: int = 7 * 86400,
-                      code_len: int = 6) -> dict:
-    """建队。返回 {team_id, code, ...}。码只在本机明文持有，服务端只见摘要。"""
+                      code_len: int = 8) -> dict:
+    """建队。返回 {team_id, code, ...}。码只在本机明文持有，服务端只见摘要。
+
+    code_len=8 是默认：6 位数字只有 20 bit 熵，协调服务的数据库一旦泄漏，
+    离线枚举 100 万个码约 19 核·小时/队（scrypt N=2^15 实测 67.6ms/次），
+    租几十个 vCPU 几十分钟就能解出全部成员的密钥 —— 协议的核心威胁模型被击穿。
+    8 位 32 字母表约 2^40，同量级算力要几十年。6 位只作为低安全档保留。
+    """
     if code_len == 6:
         code = "%06d" % (secrets.randbelow(900000) + 100000)
-    else:                                   # 8 位大熵码（更高安全档）
+    else:                                   # 8 位大熵码
         alphabet = "23456789ABCDEFGHJKLMNPQRSTUVWXYZ"   # 去掉易混的 0/O/1/I
         code = "".join(secrets.choice(alphabet) for _ in range(8))
     salt = secrets.token_hex(32)
@@ -401,6 +413,20 @@ def _usage_cursor_path(data_dir: Path) -> Path:
     return Path(data_dir) / "team_usage_cursor.json"
 
 
+def _save_cursor(cp: Path, cursor: dict):
+    """原子写用量游标。游标里只有字节数与 inode，不敏感，但顺手限权限。"""
+    try:
+        tmp = cp.with_suffix(cp.suffix + ".tmp")
+        tmp.write_text(json.dumps(cursor), encoding="utf-8")
+        try:
+            tmp.chmod(0o600)
+        except OSError:
+            pass
+        tmp.replace(cp)
+    except Exception:
+        pass                # 游标写失败只影响下轮重读，不能让它打断上报
+
+
 def _pending_usage(data_dir: Path, cursor: dict) -> tuple[list[dict], dict]:
     """从 usage.jsonl 里取未上报的记录。cursor 存 {文件inode: 已读字节偏移}。"""
     uf = Path(data_dir) / "usage.jsonl"
@@ -447,17 +473,21 @@ async def report_usage(state: TeamState, data_dir: Path) -> dict:
             cursor = json.loads(cp.read_text(encoding="utf-8"))
     except Exception:
         cursor = {}
-    items, cursor = _pending_usage(data_dir, cursor)
-    try:
-        cp.write_text(json.dumps(cursor), encoding="utf-8")
-    except Exception:
-        pass
+    items, new_cursor = _pending_usage(data_dir, cursor)
     if not items:
+        # 没有新记录也要落盘（游标可能因文件变短而回退过）
+        _save_cursor(cp, new_cursor)
         return {"ok": True, "reported": 0}
 
     # 分批，每批不超过 200 条（服务端上限）
+    #
+    # 游标必须在上报**成功之后**才推进。以前是读完就写游标，导致服务端
+    # 不可达/超时（_req 兜底返回 ok:false）时这批记录永远不再读 —— 静默丢报。
+    # 反过来「先成功再推进」最多在崩溃时少量重复，而服务端可按
+    # client_id+ts+provider+model 去重，重复远比丢失可接受。
     reported = 0
     ok_all = True
+    any_success = False
     for team_id, t in state.list_teams().items():
         if t.get("role") != "member" or t.get("status") not in ("approved", "pending"):
             continue
@@ -467,8 +497,13 @@ async def report_usage(state: TeamState, data_dir: Path) -> dict:
                            {"items": batch}, t["token"])
             if d.get("ok"):
                 reported += int(d.get("accepted") or 0)
+                any_success = True
             else:
                 ok_all = False
+    # 至少一个队伍上报成功，就认为这批已被接收，推进游标。
+    # 全部失败则不推进，下一轮重试同一批（宁可重复不可丢失）。
+    if any_success:
+        _save_cursor(cp, new_cursor)
     return {"ok": ok_all, "reported": reported, "pending": len(items)}
 
 

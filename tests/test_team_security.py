@@ -209,3 +209,87 @@ def test_purge_expired(srv):
         n = con2.execute(f"SELECT COUNT(*) FROM {tbl} WHERE team_id=?", (tid,)).fetchone()[0]
         assert n == 0, f"{tbl} 里仍残留已删队伍的数据: {n} 行"
     con2.close()
+
+
+# ============================================================
+# 组队码形态（曾因服务端只认 isdigit() 把 8 位高熵码整个废掉）
+# ============================================================
+
+def _mkteam_code(api: Api, cid: str, code: str):
+    """用任意形态的码建队。"""
+    import secrets
+    salt = secrets.token_bytes(32).hex()
+    c, b = api.post("/api/teams", {
+        "captain_client_id": cid, "code_hash": protocol.code_hash(code, salt),
+        "code_salt": salt, "ttl": 3600, "nickname": "队长"})
+    assert c == 200, f"建队失败 HTTP={c} {b}"
+    return b["team_id"]
+
+
+def test_8char_high_entropy_code_join(srv):
+    """8 位高熵码必须可用。
+
+    曾经的 bug：客户端 create_team 支持 code_len=8 的字母数字码，
+    服务端 join 却用 code.isdigit() 校验 → 队长能建队但队员永远进不来（400）。
+    而 6 位数字码只有 20 bit 熵，数据库一泄漏离线枚举约 19 核·小时/队，
+    8 位码是抗拖库的关键，所以必须真的能用。
+    """
+    api, _ = srv
+    code = "M2HP69BB"          # 与 team_client 的字母表一致
+    tid = _mkteam_code(api, "cap-8c", code)
+
+    c, b = api.post("/api/teams/join", {"team_id": tid, "code": code,
+                                        "client_id": "mem-8c", "nickname": "队员"})
+    assert c == 200 and b.get("token"), f"8 位码应能入队，HTTP={c} error={b.get('error')}"
+    assert len(b.get("code_salt", "")) == 64
+
+
+def test_six_digit_code_still_works(srv):
+    """6 位数字码（低安全档）不能被改坏。"""
+    api, _ = srv
+    code = "482913"
+    tid = _mkteam_code(api, "cap-6d", code)
+    c, b = api.post("/api/teams/join", {"team_id": tid, "code": code,
+                                        "client_id": "mem-6d", "nickname": "队员"})
+    assert c == 200 and b.get("token"), f"6 位码应能入队，HTTP={c}"
+
+
+def test_malformed_code_rejected(srv):
+    """格式非法的码必须在形态校验就被拒（400），不能送进 scrypt 消耗 CPU。
+
+    注意区分：「格式合法但码不对」会走到 scrypt 比对返回 403 wrong_code，
+    那是正确行为 —— 本测试只针对**形态非法**的输入。
+    """
+    api, _ = srv
+    tid = _mkteam_code(api, "cap-bad", "ABCD2345")
+    for bad in ("",           # 空
+                "12345",      # 5 位
+                "1234567",    # 7 位
+                "12345678",   # 8 位但含 '1'（字母表去掉了 0/O/1/I）
+                "00000000",   # 8 位但含 '0'
+                "ABCD123I",   # 8 位但含 'I'
+                "12345a",     # 6 位但非纯数字
+                "A" * 1000):  # 超长（挡 scrypt 消耗）
+        c, _ = api.post("/api/teams/join", {"team_id": tid, "code": bad,
+                                            "client_id": "mem-bad", "nickname": "队员"})
+        assert c == 400, f"形态非法的码 {bad!r} 应 400，实际 HTTP={c}"
+
+
+def test_valid_format_wrong_code(srv):
+    """格式合法但码不对：应走 scrypt 比对返回 403，而不是形态校验的 400。"""
+    api, _ = srv
+    tid = _mkteam_code(api, "cap-wrong", "ABCD2345")
+    # 「ABCDEFGH」每位都在 32 字母表里（A-H 全部存在），格式合法，只是码不对
+    c, b = api.post("/api/teams/join", {"team_id": tid, "code": "ABCDEFGH",
+                                        "client_id": "mem-wrong", "nickname": "队员"})
+    assert c == 403 and b.get("error") == "wrong_code", \
+        f"应为 403 wrong_code，实际 HTTP={c} error={b.get('error')}"
+
+
+def test_code_case_insensitive_in_alphabet(srv):
+    """字母表只含大写；小写应被判为非法（UI 已统一转大写）。"""
+    api, _ = srv
+    tid = _mkteam_code(api, "cap-case", "ABCD2345")
+    c, _ = api.post("/api/teams/join", {"team_id": tid, "code": "abcd2345",
+                                        "client_id": "mem-case", "nickname": "队员"})
+    assert c == 400, f"小写码应 400（字母表是大写），实际 HTTP={c}"
