@@ -1,9 +1,9 @@
 {
-  "version": "1.9.0",
+  "version": "1.9.1",
   "min_version": "",
-  "release_page": "https://github.com/chenshifanjian/model-reservoir/releases/tag/v1.9.0",
-  "release_notes": "v1.9.0：**组队系统重做** —— 双向同步、Key 不同就并存、默认全同步、永久队伍。\n\n适合「一群人各自注册免费账号凑额度」的用法：每人把自己那份 Key 贡献给全队，\n同步完所有人都拿到最全的上游集合，再留一个付费套餐兜底。\n\n## 双向同步（共享池）\n\n原来只有队长能推给队员。现在**任何已批准成员都能贡献**，全队共享一个池子：\n\n- 上传不再队长独占，队长与队员的差别只在「同步范围」白名单\n- 拉取时同时拿到广播包（全队可见）与定向给你的包\n- 每条上游都记着**是谁贡献的**，界面上显示「来自队伍·某某」\n\n## Key 不同就并存，绝不覆盖\n\n同一个上游平台、不同的 Key，会**当成两条不同的上游**保存，旧的原封不动。\n\n> 14 个人各自注册免费账号，覆盖等于把别人的额度顶掉 ——\n> 而聚合额度正是组队的初衷。\n\n一键配置里也一样：给已配置的平台填新的 Key 会**新增一条并存**，\n不再替换旧的。\n\n## 默认全同步，队长可关\n\n同步范围白名单**默认全部打开**，队长显式关掉的才不同步。\n\n> ⚠️ 同步即把 Key 复制到对方机器，**无法远程收回**。\n> 关掉只是不再推新的，已经推过去的收不回来。\n\n## 永久队伍\n\n建队时长新增「永久」选项。永久队伍不过期，队长可随时**轮换组队码**或关队。\n\n> 永久队伍的入队码一直有效，**一旦泄漏就是永久开放**。\n> 所以提供了轮换入口：换码后旧码立即失效。\n\n## 共享了什么，写清楚\n\n组队页可展开「同步共享了什么？」，逐条列出：\n\n- **已共享**：供应商名称、Base URL、API Key、模型列表、免费标记（端到端加密，协调服务器看不到明文）\n- **已共享**：模型用量与调用记录（时间、模型名、token 数、成功/失败）——**不包含任何对话内容**\n- **不共享**：对话正文、输入输出内容、你本地的配置文件\n\n## 一键配置：默认不动已配置的\n\n再点一键配置时，已经配好的平台会被跳过并点名，不会重建条目 ——\n你手调过的免费标记、禁用的模型、组队同步来的上游都保持原样。\n要刷新模型列表，勾「重新拉取已配置平台的模型列表」（Key 相同时）。\n\n---\n\n以下为 v1.8.0 的内容：**免费档接入** —— 一键配置从 3 个平台扩到 10 个，\n其中 `Ollama` / `LM Studio` 免 Key 开箱即用，另有 OpenRouter、Groq、Cerebras、\nGoogle Gemini、GitHub Models 五个免费注册不绑卡的官方档，每张卡片印着人话额度。\n\n付费 Key 兜底照旧：模型全部列出、徽章区分免费/付费，由你决定启用哪个。\n",
-  "download_url_windows": "https://github.com/chenshifanjian/model-reservoir/releases/download/v1.9.0/ModelReservoir-v1.9.0-windows.exe",
-  "download_url_linux": "https://github.com/chenshifanjian/model-reservoir/releases/download/v1.9.0/ModelReservoir-v1.9.0-linux-x86_64",
-  "download_url_macos": "https://github.com/chenshifanjian/model-reservoir/releases/download/v1.9.0/ModelReservoir-v1.9.0-macos.zip"
+  "release_page": "https://github.com/chenshifanjian/model-reservoir/releases/tag/v1.9.1",
+  "release_notes": "v1.9.1：**应用内升级不再裸奔** —— 下载会校验、替换会回滚。\n\n## 更新包要校验了\n\n以前下载更新只看 `Content-Length`：网络抖一下、文件传了一半，客户端照样当成成功，\n直接拿去替换正在用的程序。现在每次下载都会**边下边算 SHA256**，落盘后与\n`version.json` 里声明的 `sha256` / `size` 逐字节比对：\n\n- **大小不符** → 判定下载不完整，删掉临时文件，提示重试\n- **SHA256 不符** → 判定文件损坏或来源被替换，同样拒绝安装\n- 校验不通过时，**磁盘上现有的程序一个字节都不动**\n\n替换前还会看一眼文件头（Windows `MZ` / Linux `ELF` / macOS `Mach-O`），\n挡住「下到一个 HTML 错误页」这种情况。\n\n## 替换失败会回滚\n\n原来的替换是三连：改名 → 改名 → 启动新进程 → 立刻退出。中间任何一步失败，\n用户手上就只剩一个打不开的程序。现在**改名失败、新包拉不起来，都会把旧版换回来再报错**。\n最坏的结果是「这次更新没成」，而不是「软件打不开了」。\n\n旧版在替换期间保留为 `*.old`，作为最后的人工兜底。\n\n## 说明\n\n**这一版的校验能力，对「装 1.9.0 及更早版本的人」不生效** —— 老客户端跑的是老代码，\n它不知道自己该校验。要等装上 1.9.1 之后再更新，才走新链路。\n\n顺带修掉一个会让 **Linux 用户下载 404** 的问题：发版脚本把资产名算成 `-linux`，\n实际发布的是 `-linux-x86_64`。\n",
+  "download_url_windows": "https://github.com/chenshifanjian/model-reservoir/releases/download/v1.9.1/ModelReservoir-v1.9.1-windows.exe",
+  "download_url_linux": "https://github.com/chenshifanjian/model-reservoir/releases/download/v1.9.1/ModelReservoir-v1.9.1-linux-x86_64",
+  "download_url_macos": "https://github.com/chenshifanjian/model-reservoir/releases/download/v1.9.1/ModelReservoir-v1.9.1-macos.zip"
 }
