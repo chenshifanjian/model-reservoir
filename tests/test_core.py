@@ -499,13 +499,18 @@ def test_call_log_no_100_cap():
     """调用记录不再 100 条截断（1 万条兜底），且每条带 ts 供相对时间显示。"""
     assert app_module.CALL_LOG_MAX >= 10000
     assert app_module.call_log.maxlen == app_module.CALL_LOG_MAX
-    # ts 由 append 点写入：每个 time 行的下一行必须紧跟 ts 行（防回归）
+    # 每个 call_log.append 都必须带 ts（前端靠它算相对时间）。
+    # 以前按 '"time": time.strftime(...)' 的出现次数计数，那个数在把重复的
+    # append 收敛成 _call_fail() 之后就掉了 —— 断言该盯的是「每处 append 都有 ts」，
+    # 不是「这种写法在源码里出现过几次」。
     import inspect
     lines = inspect.getsource(app_module).splitlines()
-    time_idx = [i for i, l in enumerate(lines) if '"time": time.strftime("%H:%M:%S"),' in l]
-    assert len(time_idx) >= 9
-    for i in time_idx:
-        assert i + 1 < len(lines) and '"ts": time.time()' in lines[i + 1], f"call_log append 缺 ts: line {i}"
+    appends = [i for i, l in enumerate(lines) if "call_log.append({" in l]
+    assert len(appends) >= 6, f"call_log.append 只剩 {len(appends)} 处"
+    for i in appends:
+        window = lines[i:i + 5]
+        assert any('"ts": time.time()' in w for w in window), \
+            f"call_log append 缺 ts: line {i + 1}"
 
 
 def test_infer_modality_rules():

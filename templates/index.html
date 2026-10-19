@@ -1098,6 +1098,26 @@ td .sub-cell { font-size: 11px; color: var(--text-secondary); margin-top: 2px; }
         <tbody id="stableBody"></tbody>
       </table>
     </div>
+
+    <div class="section-head" style="margin-top:28px;">
+      <h3 class="section-title">配额冷却</h3>
+      <span class="section-hint">撞上免费平台限额的候选会暂时避让 · 只降排序不移除</span>
+    </div>
+    <div class="table-container">
+      <table>
+        <thead>
+          <tr>
+            <th>候选</th>
+            <th width="150">状态</th>
+            <th width="170">剩余请求数</th>
+            <th>下一次可用</th>
+          </tr>
+        </thead>
+        <tbody id="quotaBody">
+          <tr><td colspan="4" class="empty">加载中...</td></tr>
+        </tbody>
+      </table>
+    </div>
     </section> <!-- end monitor-view -->
 
     <section id="providers-view" class="app-view" hidden aria-label="上游">
@@ -1949,6 +1969,7 @@ async function load() {
 
     renderSummaryStrip(list);
     loadStability();
+    loadQuota();
     loadUsage();
   } catch (e) {
     if (e.message !== 'Unauthorized') console.error("Failed to load data:", e);
@@ -1991,6 +2012,71 @@ async function loadStability() {
   } catch (e) {
     if (e.message !== 'Unauthorized') console.error("Failed to load stability:", e);
   }
+}
+
+/* 配额冷却面板。
+
+账本只在「拿到过证据」之后才有内容，所以「没有行」是正常状态 —— 
+绝不能显示成加载失败。同样地，一行都不冷却不代表网关有问题，
+只代表还没撞过任何限额。
+*/
+async function loadQuota() {
+  try {
+    const r = await apiFetch('/api/quota');
+    const d = await r.json();
+    renderQuota(d.rows || []);
+  } catch (e) {
+    if (e.message !== 'Unauthorized') {
+      console.error("Failed to load quota:", e);
+      const tb = document.getElementById('quotaBody');
+      if (tb) tb.innerHTML = '<tr><td colspan="4" class="empty">读取失败</td></tr>';
+    }
+  }
+}
+
+/* a:提供方 = 整个账号的额度；m:提供方||模型 = 单个模型的额度。
+   后者按咱们的命名约定显示成 提供方/模型。
+*/
+function quotaScopeName(scope) {
+  if (scope.startsWith('a:')) return scope.slice(2) + "（账号）";
+  return scope.slice(2).replace('||', '/');
+}
+
+function fmtWait(sec) {
+  if (sec >= 3600) return (sec / 3600).toFixed(1) + " 小时后";
+  if (sec >= 60) return Math.round(sec / 60) + " 分钟后";
+  return Math.round(sec) + " 秒后";
+}
+
+function renderQuota(rows) {
+  const tb = document.getElementById('quotaBody');
+  if (!tb) return;
+  if (!rows.length) {
+    tb.innerHTML = '<tr><td colspan="4" class="empty">' +
+      '还没有额度记录 —— 说明至今没撞过任何免费平台的限额</td></tr>';
+    return;
+  }
+  const shown = rows.slice(0, 30);
+  tb.innerHTML = shown.map(function (r) {
+    const cooling = !!r.cooling;
+    const state = cooling
+      ? '<span style="color:var(--warning,#d97706);">冷却中</span>'
+      : '<span style="color:var(--text-secondary);">可用</span>';
+    const rem = (r.requests_remaining === null || r.requests_remaining === undefined)
+      ? '—' : r.requests_remaining;
+    const wait = cooling ? fmtWait(r.cooldown_left)
+      : (r.requests_reset_in !== null && r.requests_reset_in !== undefined)
+        ? fmtWait(r.requests_reset_in) + '重置' : '—';
+    const esc = function (s) {
+      return String(s).replace(/[&<>"]/g, function (c) {
+        return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c];
+      });
+    };
+    return '<tr><td>' + esc(quotaScopeName(r.scope)) + '</td><td>' + state +
+      '</td><td>' + esc(rem) + '</td><td>' + esc(wait) + '</td></tr>';
+  }).join('') + (rows.length > shown.length
+    ? '<tr><td colspan="4" class="empty">仅显示前 ' + shown.length +
+      ' 条，共 ' + rows.length + ' 条</td></tr>' : '');
 }
 
 let usageDays = 1;

@@ -1,23 +1,10 @@
 {
-  "version": "1.9.3",
+  "version": "1.10.0",
   "min_version": "",
-  "release_page": "https://github.com/chenshifanjian/model-reservoir/releases/tag/v1.9.3",
-  "release_notes": "v1.9.3：**本地 API Key 可以一键随机生成了**。\n\n## 随机本地 Key\n\n上游页「本地接口信息」的 API Key 右边多了一个「随机」按钮：\n\n- 生成 `sk-local-` + 32 位十六进制（16 字节，`secrets.token_hex`），和旧 key 同格式同长度，客户端不用改代码\n- **立即生效**：内存里的 key 一起换，不用重启程序\n- 旧 key **立刻失效且不可找回**，所以是两步确认：第一次点只弹提示，3 秒内再点一次才真换\n- 新 key 自动复制到剪贴板，直接去客户端粘贴\n- 日志只记「已轮换」，不记 key 本身\n\n什么时候用：key 以前贴进过聊天记录、截图、issue，或者本机其他程序能读到 `config.json`，\n轮换一次比逐条排查省事。\n\n注意：换完之后所有已对接的客户端都会收到 401，需要同步改成新 key —— 这也是它要求二次确认的原因。\n",
-  "download_url_windows": "https://github.com/chenshifanjian/model-reservoir/releases/download/v1.9.3/ModelReservoir-v1.9.3-windows.exe",
-  "download_url_linux": "https://github.com/chenshifanjian/model-reservoir/releases/download/v1.9.3/ModelReservoir-v1.9.3-linux-x86_64",
-  "download_url_macos": "https://github.com/chenshifanjian/model-reservoir/releases/download/v1.9.3/ModelReservoir-v1.9.3-macos.zip",
-  "artifacts": {
-    "windows": {
-      "sha256": "8ac79ae0d05c70f3e5caf94dd129afed3883d89305e8882ada26fa19f33fe9de",
-      "size": 30520793
-    },
-    "linux": {
-      "sha256": "69dec46ca53362ec19940327826dfeaf9b12789900365d5a3b1bc83a9f0916fc",
-      "size": 176475600
-    },
-    "macos": {
-      "sha256": "01c6825ced9144f957931f1653a6c18756d6a0b0192e85db44cd7b747f7508fd",
-      "size": 28225095
-    }
-  }
+  "release_page": "https://github.com/chenshifanjian/model-reservoir/releases/tag/v1.10.0",
+  "release_notes": "v1.10.0：免费额度不再靠撞墙来发现，Claude Code 也能接进来了。\n\n## 配额账本（免费档终于知道自己还剩多少额度）\n\n以前网关只有熔断：连错 3 次冷却 60 秒。但撞上免费平台的**每日限额**不是故障，是额度用完了 —— 熔断 60 秒后又去撞，撞一整夜。\n\n现在按 (提供方, 模型) 和 (提供方账号) 两层记账：\n\n- **只认证据，不猜上限。** 证据只有上游的 `X-RateLimit-*` 头和 429 响应两种，没有证据就当无限额度放行。\n- 429 按 90s → 2m → 10m → 1h → 1d 阶梯退避，成功一次退一格。\n- 文案里点名「每日/配额」的 429，直接避让到 **UTC 午夜**（免费平台几乎都按 UTC 自然日重置）。\n- `Retry-After` 头优先。\n- **只影响排序，不移除候选。** 全部候选都在冷却时照样返回，让请求有机会撞一次。\n\n监控页新增「配额」接口（`/api/quota`），能看到哪些候选因为额度在冷却、还要多久。\n\n## X-Routed-Via：说清楚这次是谁回的\n\n网关一直在悄悄换人 —— 识图辅助会改派路由组、路由组会跨模型切换、某个候选连不上会自动跳过。以前客户端完全不知情，只会觉得「回答风格怎么变了」。\n\n现在每次响应带两个头：\n\n- `X-Routed-Via: 供应商/模型 (upstream: 上游模型名)` —— 实际回复的那个\n- `X-Fallback-Detail: 供应商A/模型: upstream-429; …` —— 中间跳过了谁、为什么\n\n中文提供方名会自动百分号编码，不会因为一个中文字发出非法头。\n（注意：响应头在第一个字节发出前就定死了，所以**流中途降级改不了头** —— 这时头写的是最初选中的人，正文是后面接上的，从 Fallback-Detail 能看出跳过了谁。）\n\n## Anthropic Messages 面：Claude Code 直接连本机网关\n\n`POST /v1/messages` 现在可用了。Claude Code、Cline 这类只认 Anthropic 线格式的客户端，不用再绕一层转换就能用上咱们聚合的免费档。\n\n翻译层走的是**同一条**路由/熔断/配额/前缀注入的路，不是另起一套转发 —— 两套逻辑分头演进是这类网关最常见的腐烂方式。\n\n支持：system、图片（base64 与 URL）、tools / tool_choice（auto/any/tool/none）、tool_use ⇄ tool_calls、tool_result ⇄ tool 消息、stop_sequences、流式全事件序列（message_start → content_block_* → message_delta → message_stop）。\n不支持的字段（extended thinking、citations）静默丢弃而不是报 400。\n\n配置方式：把 Claude Code 指向 `http://127.0.0.1:8001/v1`，API Key 填本机的 `sk-local-…`，模型名用 `供应商/模型名`（和 OpenAI 面同一套命名）。\n",
+  "download_url_windows": "https://github.com/chenshifanjian/model-reservoir/releases/download/v1.10.0/ModelReservoir-v1.10.0-windows.exe",
+  "download_url_linux": "https://github.com/chenshifanjian/model-reservoir/releases/download/v1.10.0/ModelReservoir-v1.10.0-linux-x86_64",
+  "download_url_macos": "https://github.com/chenshifanjian/model-reservoir/releases/download/v1.10.0/ModelReservoir-v1.10.0-macos.zip",
+  "artifacts": {}
 }

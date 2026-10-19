@@ -110,9 +110,16 @@ class _Upstream:
 
 
 class _SimpleResp:
-    def __init__(self, status, text):
+    """假上游响应。
+
+    headers 必须有：非流式路径现在会读 resp.headers 喂配额账本，
+    少了这个属性整条转发会 AttributeError 掉。
+    """
+
+    def __init__(self, status, text, headers=None):
         self.status_code = status
         self.text = text
+        self.headers = dict(headers or {})
 
     def json(self):
         return json.loads(self.text)

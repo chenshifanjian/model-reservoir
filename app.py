@@ -24,7 +24,12 @@ from fastapi.templating import Jinja2Templates
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from pydantic import BaseModel
 import httpx
+import urllib.parse
 import secrets
+
+# 免费档配额账本。与熔断分工：熔断记「刚坏没坏」，账本记「额度还剩多少」。
+# 见 quota.py 顶部的三条设计约束。
+import quota
 import webbrowser
 import re
 import copy
@@ -131,7 +136,7 @@ META_FILE = DATA_DIR / "models_meta.json"
 ROUTERS_FILE = DATA_DIR / "routers.json"
 ANNOUNCEMENT_FILE = DATA_DIR / "announcement.json"
 
-APP_VERSION = "1.9.3"
+APP_VERSION = "1.10.0"
 
 MAX_HISTORY_DAYS = 30
 MAX_USAGE_DAYS = 30        # 按天数范围查询(近24小时/7天/30天)的上限
@@ -1006,7 +1011,8 @@ def record_success(key: str):
 # ============================================================
 # 探测
 # ============================================================
-async def check_model(base_url: str, api_key: str, model: str) -> dict:
+async def check_model(base_url: str, api_key: str, model: str,
+                      provider_name: str | None = None) -> dict:
     actual_model = MODEL_ALIASES.get(model, model)
     url = base_url.rstrip("/") + "/chat/completions"
     payload = {
@@ -1023,6 +1029,11 @@ async def check_model(base_url: str, api_key: str, model: str) -> dict:
     try:
         resp = await http_client.post(url, json=payload, headers=headers, timeout=30)
         latency = round((time.time() - start) * 1000)
+        # 探测响应的 X-RateLimit-* 头是账本最干净的证据来源：探测只发 5 token，
+        # 却带回了完整的额度窗口。不记账等于白探。
+        if provider_name:
+            quota.observe(provider_name, model, status=resp.status_code,
+                          headers=resp.headers, message=resp.text[:300])
         if resp.status_code == 200:
             usage = resp.json().get("usage", {})
             return {
@@ -1150,12 +1161,12 @@ async def run_health_checks(tasks: list[tuple[str, str, str, str]]) -> dict:
     """并发检测所有 (name, model, base_url, api_key) 任务，返回 {key: result}。"""
     sem = asyncio.Semaphore(10)
 
-    async def limited_check(url, key, m):
+    async def limited_check(url, key, m, nm):
         async with sem:
-            return await check_model(url, key, m)
+            return await check_model(url, key, m, provider_name=nm)
 
     results = await asyncio.gather(
-        *[limited_check(url, key, m) for _, m, url, key in tasks],
+        *[limited_check(url, key, m, nm) for nm, m, url, key in tasks],
         return_exceptions=True,
     )
     new_status = {}
@@ -1334,6 +1345,12 @@ class PresetApplyIn(BaseModel):
 # ============================================================
 # 模型选择
 # ============================================================
+def _split_key(k: str) -> tuple[str, str]:
+    """`提供方||模型` → (提供方, 模型)。给配额账本用。"""
+    name, _, m = k.partition("||")
+    return name, m
+
+
 def pick_available_models(model: str | None = None, force: bool = False) -> list[tuple[dict, str]]:
     """返回按质量排序的候选 (provider, model) 列表"""
     
@@ -1349,7 +1366,12 @@ def pick_available_models(model: str | None = None, force: bool = False) -> list
     def _tier_of(k: str) -> int:
         h = health_status.get(k)
         if is_circuit_open(k):
-            return 2                        # 运行时熔断比探测判定更实时
+            return 2                        # 运行时熔断比探测更实时
+        # 配额冷却跟熔断同档：额度用完不是「这个模型坏了」，是「现在别去」。
+        # 账本能说出熔断说不出的话 —— 什么时候可以再试，而不用靠反复撞 429 猜。
+        # 放在熔断之后：熔断是刚刚发生的事实，账本可能是几分钟前的日限额。
+        if quota.is_cooling(*_split_key(k)):
+            return 2
         if not h or not h.get("status"):
             return 0                        # 还没探过 = 不算问题
         av = classify_availability(h.get("code"), h.get("status", "unknown"),
@@ -1370,12 +1392,16 @@ def pick_available_models(model: str | None = None, force: bool = False) -> list
                     # 路由组是用户显式圈定的模型，不做可用性判定 ——
                     # 显式指定就意味着「我就要它」，探测结果只影响排序不影响去留
                     tiers[0].append((p, m, k))
+        # 路由组的候选一个都不删（显式圈定 =「我就要它」），但正在冷却的沉底：
+        # 用户圈了一组模型，其中几个撞了日限额 —— 排后面仍然可用，
+        # 只是不第一个上，这样「圈定的集合」和「现在最省额度的」都能兼顾。
         scored = [
-            (get_quality_score(k), get_avg_latency(k) or 1e9, p, m)
+            (1 if quota.is_cooling(*_split_key(k)) else 0,
+             get_quality_score(k), get_avg_latency(k) or 1e9, p, m)
             for p, m, k in tiers[0]
         ]
-        scored.sort(key=lambda x: (-x[0], x[1]))
-        return [(p, m) for _, _, p, m in scored]
+        scored.sort(key=lambda x: (x[0], -x[1], x[2]))
+        return [(p, m) for _, _, _, p, m in scored]
 
     # 否则按具体模型匹配
     for p in providers:
@@ -1959,6 +1985,21 @@ def build_stability_rows(model_stats: dict, allowed, health: dict) -> list:
     rows.sort(key=lambda r: (-r["availability"] if r["availability"] is not None else 1,
                              r["avg_latency_ms"] or 99999))
     return rows
+
+
+@app.get("/api/quota")
+async def quota_ledger_view(_=Depends(verify_admin)):
+    """配额账本快照：哪些候选因为额度在冷却、还要多久。
+
+    只暴露作用域名（提供方+模型）与计数，不含任何 key —— 
+    这个页面会被人截图发出去。
+    """
+    rows = quota.snapshot()
+    return {
+        "rows": rows,
+        "cooling": [r for r in rows if r["cooling"]],
+        "updated_at": time.time(),
+    }
 
 
 @app.get("/api/stability")
@@ -2866,7 +2907,8 @@ async def manual_check(name: str, model: str, _=Depends(verify_admin)):
 
     for p in providers:
         if p["name"] == name:
-            result = await check_model(p["base_url"], p["api_key"], model)
+            result = await check_model(p["base_url"], p["api_key"], model,
+                                       provider_name=p["name"])
             k = f"{name}||{model}"
             result["checked_at"] = time.time()
             health_status[k] = result
@@ -3130,166 +3172,299 @@ def _inject_cn_hint(body: dict):
 # ============================================================
 # 代理（客户端鉴权）
 # ============================================================
+# ============================================================
+# 上游连接与路由头
+# ============================================================
+def _call_fail(provider: dict, model: str, err: str):
+    """调用日志记一笔失败。
+
+    这段字典以前在流式/非流式两条路径里各写了三遍，改一处漏两处。
+    """
+    call_log.append({
+        "time": time.strftime("%H:%M:%S"),
+        "ts": time.time(),          # 前端相对时间显示用
+        "provider": provider["name"],
+        "model": model,
+        "status": "fail",
+        "tokens": 0,
+        "error": err,
+    })
+
+
+def _header_safe(s: str, limit: int = 512) -> str:
+    """把任意字符串变成合法的 HTTP 头值。
+
+    提供方/模型名里有中文（`乌班图Qwen3.8-27B`），直接塞进响应头会让 httpx
+    拒发或发出一个非法头 —— 为了一个可读名赔上整个响应不划算。
+    非 ASCII 一律百分号编码，客户端要显示时自己解码。
+    """
+    s = s or ""
+    try:
+        s.encode("ascii")
+        return s[:limit]
+    except UnicodeEncodeError:
+        return urllib.parse.quote(s[: limit // 4], safe="")
+
+
+def _routing_headers(opened, tried: list[str]) -> dict:
+    """X-Routed-Via / X-Fallback-Detail。
+
+    响应头在第一个字节发出前就定死了，所以它只能如实回答「最初选中了谁」。
+    流中途降级改不了头 —— 客户端会看到头写着 A、正文却是 B 接着写的，
+    这不是 bug 而是这个机制的边界，从 Fallback-Detail 能看出中间跳过了谁。
+    """
+    hdr = {}
+    if opened:
+        provider, model = opened
+        hdr["X-Routed-Via"] = _header_safe(
+            f"{local_model_id(provider['name'], model)}"
+            f" (upstream: {MODEL_ALIASES.get(model, model)})")
+    if tried:
+        hdr["X-Fallback-Detail"] = _header_safe("; ".join(tried[:6]))
+    return hdr
+
+
+class _UpstreamRefused(Exception):
+    """这个候选连不上/被拒：账已记完，换下一个。
+
+    单独一个类型，不要退化成 `except Exception` —— 否则一个 429 会被当成
+    「整个请求失败」，而不是「换一个候选」。
+
+    两个说法：`code` 是给响应头用的 ASCII 标记，`human` 是给人看的中文。
+    分开是因为头值必须是 ASCII，而一个中文字就会把整条头百分号编码掉 —— 
+    那样 "A/m: 连接失败" 会变成 "A%2Fm%3A%E8%BF%9E..."，排障时没人读得懂。
+    """
+
+    def __init__(self, code: str, human: str | None = None):
+        super().__init__(code)
+        self.code = code
+        self.human = human or code
+
+
+async def _open_stream(provider: dict, model: str, body: dict, accumulated: str = ""):
+    """连上上游流式端点，成功返回 (resp, req_body)。
+
+    这一步被从生成器里提出来，是因为**响应头必须在第一个字节发出前确定**：
+    不急切连上第一个真正能用的候选，X-Routed-Via 就只能靠猜。
+    连不上或非 200 抛 _UpstreamRefused，记账与调用日志都在这里做完。
+    """
+    k = f"{provider['name']}||{model}"
+    req_body = copy.deepcopy(body)
+    req_body["model"] = MODEL_ALIASES.get(model, model)
+
+    if accumulated:
+        msgs = list(req_body.get("messages", []))
+        msgs.append({"role": "assistant", "content": accumulated})
+        msgs.append({"role": "user", "content": "请继续上面的回复，从中断处接着写。"})
+        req_body["messages"] = msgs
+
+    url = provider["base_url"].rstrip("/") + "/chat/completions"
+    headers = {
+        **auth_headers(provider["api_key"]),
+        "Content-Type": "application/json",
+    }
+
+    quota.note(provider["name"], model)
+    req = http_client.build_request("POST", url, json=req_body, headers=headers)
+    try:
+        resp = await http_client.send(req, stream=True)
+    except httpx.RequestError as e:
+        logger.warning("stream connect error to %s: %s", provider["name"], e)
+        record_fail(k)
+        quota.observe(provider["name"], model, message=str(e)[:200])
+        _call_fail(provider, model, "连接失败")
+        raise _UpstreamRefused("connect-failed", "连接失败") from None
+
+    if resp.status_code != 200:
+        try:
+            await resp.aread()
+        except Exception:
+            pass
+        txt = ""
+        try:
+            txt = resp.text or ""
+        except Exception:
+            pass
+        logger.warning("upstream stream error %d from %s",
+                       resp.status_code, provider["name"])
+        if _provider_fault(resp.status_code):
+            record_fail(k)
+        # 429 的证据在这里最完整：状态码、Retry-After、错误文案三样齐全，
+        # 账本据此决定是退一格（90s）还是直接等到日窗口重置（可能几小时）。
+        quota.observe(provider["name"], model, status=resp.status_code,
+                      headers=resp.headers, message=txt[:300])
+        _call_fail(provider, model, f"HTTP {resp.status_code}")
+        await resp.aclose()
+        raise _UpstreamRefused(f"upstream-{resp.status_code}",
+                               f"HTTP {resp.status_code}") from None
+
+    quota.observe(provider["name"], model,
+                  status=resp.status_code, headers=resp.headers)
+    return resp, req_body
+
+
 async def _stream_with_failover(candidates, body, is_router, prelude: str = ""):
     """流式转发，中断时自动切换下一个候选模型继续输出。prelude 为先输出给用户的提示文本。"""
+    tried: list[str] = []
+    max_attempts = 2 if is_router else 1
+
+    # ── 急切连接 ──
+    # 在返回响应头之前挑出一个真正连得上的候选。流一旦开始，头就再也改不了了。
+    opened = None                       # (provider, model)，只给响应头用
+    first_provider = first_model = None
+    first_resp = first_body = None
+    for _attempt in range(max_attempts):
+        for provider, model in candidates:
+            try:
+                resp, req_body = await _open_stream(provider, model, body)
+            except _UpstreamRefused as e:
+                tried.append(f"{local_model_id(provider['name'], model)}: {e.code}")
+                continue
+            opened = (provider, model)
+            first_provider, first_model = provider, model
+            first_resp, first_body = resp, req_body
+            break
+        if opened:
+            break
+
+    headers = _routing_headers(opened, tried)
+
+    if not opened:
+        # 一个都连不上：照样按 SSE 收尾，别让客户端挂着等超时
+        async def gen_failed():
+            tail = ("\n\n⚠️ 所有模型均失败（%s），回复中断。"
+                    % ("；".join(tried[:6]) if tried else "无可用候选"))
+            yield "data: " + json.dumps(
+                {"choices": [{"delta": {"content": tail}, "index": 0}]},
+                ensure_ascii=False) + "\n\n"
+            yield "data: [DONE]\n\n"
+        return StreamingResponse(gen_failed(), media_type="text/event-stream",
+                                 headers=headers)
 
     async def gen():
         accumulated = ""
         prefix_done = False
         last_err = ""
-        max_attempts = 2 if is_router else 1
 
         if prelude:
-            yield "data: " + json.dumps({"choices": [{"delta": {"content": prelude}, "index": 0}]}, ensure_ascii=False) + "\n\n"
+            yield "data: " + json.dumps(
+                {"choices": [{"delta": {"content": prelude}, "index": 0}]},
+                ensure_ascii=False) + "\n\n"
 
-        for _attempt in range(max_attempts):
-            for provider, model in candidates:
-                k = f"{provider['name']}||{model}"
-                req_body = copy.deepcopy(body)
-                req_body["model"] = MODEL_ALIASES.get(model, model)
+        # 第一个候选已经在返回响应头前连好了，后续候选按需再连
+        pending = [(first_provider, first_model, first_resp, first_body)]
+        rounds = 1
 
-                if accumulated:
-                    msgs = list(req_body.get("messages", []))
-                    msgs.append({"role": "assistant", "content": accumulated})
-                    msgs.append({"role": "user", "content": "请继续上面的回复，从中断处接着写。"})
-                    req_body["messages"] = msgs
+        while True:
+            if not pending:
+                if rounds >= max_attempts:
+                    break
+                rounds += 1
+                pending = [(p, m, None, None) for p, m in candidates]
 
-                url = provider["base_url"].rstrip("/") + "/chat/completions"
-                headers = {
-                    **auth_headers(provider["api_key"]),
-                    "Content-Type": "application/json",
-                }
-
-                req = http_client.build_request("POST", url, json=req_body, headers=headers)
+            provider, model, resp, req_body = pending.pop(0)
+            k = f"{provider['name']}||{model}"
+            if resp is None:
                 try:
-                    resp = await http_client.send(req, stream=True)
-                except httpx.RequestError as e:
-                    logger.warning("stream connect error to %s: %s", provider["name"], e)
-                    record_fail(k)
+                    resp, req_body = await _open_stream(
+                        provider, model, body, accumulated)
+                except _UpstreamRefused as e:
+                    last_err = e.human
+                    tried.append(f"{local_model_id(provider['name'], model)}: {e.code}")
+                    continue
+
+            usage_obj = None
+            stream_ok = True
+
+            try:
+                async for line in resp.aiter_lines():
+                    if not line:
+                        continue
+                    if not line.startswith("data: "):
+                        yield line + "\n"
+                        continue
+                    data_str = line[6:]
+                    if data_str.strip() == "[DONE]":
+                        yield "data: [DONE]\n\n"
+                        break
+                    try:
+                        obj = json.loads(data_str)
+                        if obj.get("usage"):
+                            usage_obj = obj["usage"]
+                        if "model" in obj and isinstance(obj["model"], str):
+                            obj["model"] = local_model_id(provider["name"], model)
+                        choices = obj.get("choices") or []
+                        if choices:
+                            delta = choices[0].get("delta") or {}
+                            c = delta.get("content")
+                            if isinstance(c, str):
+                                accumulated += c
+                            rc = delta.get("reasoning_content")
+                            if isinstance(rc, str):
+                                accumulated += rc
+                        if not prefix_done:
+                            choices2 = obj.get("choices") or []
+                            if choices2:
+                                delta2 = choices2[0].get("delta") or {}
+                                c2 = delta2.get("content")
+                                if isinstance(c2, str) and c2:
+                                    delta2["content"] = (
+                                        f"🤖 {local_model_id(provider['name'], model)}\n\n{c2}")
+                                    prefix_done = True
+                        out = json.dumps(obj, ensure_ascii=False)
+                        out = restore_hermes_text(out)
+                        yield "data: " + out + "\n\n"
+                    except json.JSONDecodeError:
+                        yield line + "\n"
+                record_success(k)
+                quota.observe(provider["name"], model, status=200)
+                try:
+                    pt = (usage_obj or {}).get("prompt_tokens", 0) or 0
+                    ct = (usage_obj or {}).get("completion_tokens", 0) or 0
+                    await append_usage({
+                        "ts": time.time(), "model": model,
+                        "provider": provider["name"],
+                        "pt": pt, "ct": ct, "tt": pt + ct,
+                    })
                     call_log.append({
                         "time": time.strftime("%H:%M:%S"),
                         "ts": time.time(),  # 前端相对时间显示用
                         "provider": provider["name"],
                         "model": model,
-                        "status": "fail",
-                        "tokens": 0,
-                        "error": "连接失败",
+                        "status": "ok",
+                        "tokens": pt + ct,
                     })
-                    continue
-
-                if resp.status_code != 200:
-                    try:
-                        await resp.aread()
-                    except Exception:
-                        pass
-                    await resp.aclose()
-                    logger.warning("upstream stream error %d from %s", resp.status_code, provider["name"])
-                    if _provider_fault(resp.status_code):
-                        record_fail(k)
-                    last_err = f"upstream {resp.status_code}"
-                    call_log.append({
-                        "time": time.strftime("%H:%M:%S"),
-                        "ts": time.time(),  # 前端相对时间显示用
-                        "provider": provider["name"],
-                        "model": model,
-                        "status": "fail",
-                        "tokens": 0,
-                        "error": f"HTTP {resp.status_code}",
-                    })
-                    continue
-
-                usage_obj = None
-                stream_ok = True
-
-                try:
-                    async for line in resp.aiter_lines():
-                        if not line:
-                            continue
-                        if not line.startswith("data: "):
-                            yield line + "\n"
-                            continue
-                        data_str = line[6:]
-                        if data_str.strip() == "[DONE]":
-                            yield "data: [DONE]\n\n"
-                            break
-                        try:
-                            obj = json.loads(data_str)
-                            if obj.get("usage"):
-                                usage_obj = obj["usage"]
-                            if "model" in obj and isinstance(obj["model"], str):
-                                obj["model"] = local_model_id(provider["name"], model)
-                            choices = obj.get("choices") or []
-                            if choices:
-                                delta = choices[0].get("delta") or {}
-                                c = delta.get("content")
-                                if isinstance(c, str):
-                                    accumulated += c
-                                rc = delta.get("reasoning_content")
-                                if isinstance(rc, str):
-                                    accumulated += rc
-                            if not prefix_done:
-                                choices2 = obj.get("choices") or []
-                                if choices2:
-                                    delta2 = choices2[0].get("delta") or {}
-                                    c2 = delta2.get("content")
-                                    if isinstance(c2, str) and c2:
-                                        delta2["content"] = f"🤖 {local_model_id(provider['name'], model)}\n\n{c2}"
-                                        prefix_done = True
-                            out = json.dumps(obj, ensure_ascii=False)
-                            out = restore_hermes_text(out)
-                            yield "data: " + out + "\n\n"
-                        except json.JSONDecodeError:
-                            yield line + "\n"
-                    record_success(k)
-                    try:
-                        pt = (usage_obj or {}).get("prompt_tokens", 0) or 0
-                        ct = (usage_obj or {}).get("completion_tokens", 0) or 0
-                        await append_usage({
-                            "ts": time.time(), "model": model,
-                            "provider": provider["name"],
-                            "pt": pt, "ct": ct, "tt": pt + ct,
-                        })
-                        call_log.append({
-                            "time": time.strftime("%H:%M:%S"),
-                            "ts": time.time(),  # 前端相对时间显示用
-                            "provider": provider["name"],
-                            "model": model,
-                            "status": "ok",
-                            "tokens": pt + ct,
-                        })
-                    except Exception:
-                        logger.exception("append_usage(stream) failed")
-                    return
                 except Exception:
-                    stream_ok = False
-                    logger.exception("stream interrupted from %s, switching", provider["name"])
-                    record_fail(k)
-                    call_log.append({
-                        "time": time.strftime("%H:%M:%S"),
-                        "ts": time.time(),  # 前端相对时间显示用
-                        "provider": provider["name"],
-                        "model": model,
-                        "status": "fail",
-                        "tokens": 0,
-                        "error": "流中断",
-                    })
+                    logger.exception("append_usage(stream) failed")
+                return
+            except Exception:
+                stream_ok = False
+                logger.exception("stream interrupted from %s, switching", provider["name"])
+                record_fail(k)
+                quota.observe(provider["name"], model, message="stream interrupted")
+                _call_fail(provider, model, "流中断")
+                tried.append(f"{local_model_id(provider['name'], model)}: stream-broken")
+                last_err = "流中断"
+                try:
+                    await resp.aclose()
+                except Exception:
+                    pass
+                continue
+            finally:
+                if stream_ok:
                     try:
                         await resp.aclose()
                     except Exception:
                         pass
-                    continue
-                finally:
-                    if stream_ok:
-                        try:
-                            await resp.aclose()
-                        except Exception:
-                            pass
 
-        tail = "\n\n⚠️ 所有模型均失败（%s），回复中断。" % (last_err or "无可用候选")
-        yield "data: " + json.dumps({"choices": [{"delta": {"content": tail}, "index": 0}]}, ensure_ascii=False) + "\n\n"
+        tail = ("\n\n⚠️ 所有模型均失败（%s），回复中断。"
+                % ("；".join(tried[:6]) or last_err or "无可用候选"))
+        yield "data: " + json.dumps(
+            {"choices": [{"delta": {"content": tail}, "index": 0}]},
+            ensure_ascii=False) + "\n\n"
         yield "data: [DONE]\n\n"
 
-    return StreamingResponse(gen(), media_type="text/event-stream")
+    return StreamingResponse(gen(), media_type="text/event-stream", headers=headers)
 
 
 @app.api_route("/v1/chat/completions", methods=["POST"], dependencies=[Depends(verify_client)])
@@ -3325,6 +3500,7 @@ async def proxy_chat(request: Request, force: bool = False):
     stream = body.get("stream", False)
     last_err = None
     last_client_error = None   # (status, body) —— 全部失败时原样回传给调用方
+    tried: list[str] = []      # 给 X-Fallback-Detail 用，跟流式路径同一套
 
     if stream:
         return await _stream_with_failover(candidates, body, is_router, prelude=vision_prelude)
@@ -3341,11 +3517,16 @@ async def proxy_chat(request: Request, force: bool = False):
             }
 
             try:
+                quota.note(provider["name"], model)
                 resp = await http_client.post(url, json=req_body, headers=headers, timeout=120)
+                quota.observe(provider["name"], model, status=resp.status_code,
+                              headers=resp.headers, message=resp.text[:300])
                 if resp.status_code >= 400:
                     logger.warning("upstream %d from %s: %s", resp.status_code, provider["name"], resp.text[:200])
                     if _provider_fault(resp.status_code):
                         record_fail(k)
+                    tried.append(
+                        f"{local_model_id(provider['name'], model)}: HTTP {resp.status_code}")
                     last_err = f"upstream {resp.status_code}"
                     if 400 <= resp.status_code < 500:
                         # 4xx 是请求本身的问题，把上游原话记住：全部候选都失败时原样回传，
@@ -3403,7 +3584,8 @@ async def proxy_chat(request: Request, force: bool = False):
                             msg["content"] = prefix
                     except (KeyError, IndexError, TypeError):
                         pass
-                    return JSONResponse(content=parsed, status_code=resp.status_code)
+                    return JSONResponse(content=parsed, status_code=resp.status_code,
+                                        headers=_routing_headers((provider, model), tried))
                 except json.JSONDecodeError:
                     logger.warning("upstream non-json from %s: %s", provider["name"], resp.text[:200])
                     record_fail(k)
@@ -3457,7 +3639,8 @@ async def proxy_chat(request: Request, force: bool = False):
             payload = {"error": {"message": raw[:2000] or f"upstream {status}",
                                  "type": "upstream_error", "code": status}}
         logger.info("all candidates failed with client error %d, passing through", status)
-        return JSONResponse(content=payload, status_code=status)
+        return JSONResponse(content=payload, status_code=status,
+                            headers=_routing_headers(None, tried))
 
     raise HTTPException(502, f"所有候选模型均失败: {last_err}")
 
@@ -3704,6 +3887,100 @@ async def proxy_models():
     _models_cache["data"] = result
     _models_cache["ts"] = now
     return result
+
+
+# ============================================================
+# Anthropic Messages 面（/v1/messages）
+# ============================================================
+# Claude Code / Cline 这类客户端只认 Anthropic 线格式，没法指向 OpenAI 兼容
+# 网关。这里把它们的请求翻译成 OpenAI 格式，交给 proxy_chat —— 走的是
+# 同一条路由/熔断/配额/前缀注入的路，不另起一套转发逻辑。
+# 翻译细节全在 anthropic_compat.py，那边有字段级注释。
+import anthropic_compat as _ac
+
+
+class _ShimRequest:
+    """让 proxy_chat 能被 /v1/messages 直接复用。
+
+    proxy_chat 只用到 `await request.json()`，所以一个最小的鸭子类型就够了 —— 
+    不去复制它的转发逻辑，那正是这类网关腐烂的起点。
+    """
+
+    def __init__(self, body: dict):
+        self._body = body
+
+    async def json(self):
+        return self._body
+
+
+def _anthropic_error(status: int, message: str) -> JSONResponse:
+    """按 Anthropic 的错误体回错。客户端靠 error.type 决定要不要重试。"""
+    return JSONResponse(
+        content=_ac.error_body(_ac.status_to_error_type(status), message),
+        status_code=status,
+    )
+
+
+@app.api_route("/v1/messages", methods=["POST"], dependencies=[Depends(verify_client)])
+async def anthropic_messages(request: Request):
+    try:
+        body = await request.json()
+    except Exception:
+        return _anthropic_error(400, "invalid JSON body")
+    if not isinstance(body, dict):
+        return _anthropic_error(400, "request body must be a JSON object")
+
+    model = (body.get("model") or "").strip()
+    if not model:
+        return _anthropic_error(400, "model: field required")
+    if not body.get("messages"):
+        return _anthropic_error(400, "messages: field required")
+
+    oa_body = _ac.to_openai_request(body)
+    stream = bool(body.get("stream"))
+    oa_body["stream"] = stream
+
+    # 先探候选：没有可用模型时给一个干净的 Anthropic 错误，
+    # 而不是让 proxy_chat 抛 FastAPI 的 HTTPException（那会回一个非 Anthropic 形状的体）
+    if not pick_available_models(model):
+        return _anthropic_error(503, f"no available model: {model}")
+
+    try:
+        resp = await proxy_chat(_ShimRequest(oa_body))
+    except HTTPException as e:
+        return _anthropic_error(e.status_code, str(e.detail))
+    except Exception:
+        logger.exception("anthropic_messages forward failed")
+        return _anthropic_error(500, "internal gateway error")
+
+    # 路由头原样继承：X-Routed-Via / X-Fallback-Detail 对 Anthropic 客户端同样有用
+    hdr = {"X-Routed-Via": resp.headers.get("X-Routed-Via", ""),
+           "X-Fallback-Detail": resp.headers.get("X-Fallback-Detail", "")}
+    hdr = {k: v for k, v in hdr.items() if v}
+
+    if stream:
+        return StreamingResponse(
+            _ac.sse_to_anthropic(resp.body_iterator, model),
+            media_type="text/event-stream", headers=hdr)
+
+    try:
+        oa = json.loads(resp.body)
+    except Exception:
+        logger.warning("anthropic_messages: non-json upstream body")
+        return _anthropic_error(502, "upstream returned non-JSON")
+
+    if resp.status_code >= 400:
+        # 上游 4xx 原样透传（v1.9.2 起的行为）—— 翻译成 Anthropic 错误体，
+        # 但状态码保持原样，客户端才能正确区分限流/鉴权/参数错
+        msg = ((oa.get("error") or {}).get("message")
+               or f"upstream {resp.status_code}")
+        out = JSONResponse(content=_ac.error_body(
+            _ac.status_to_error_type(resp.status_code), msg),
+            status_code=resp.status_code, headers=hdr)
+        return out
+
+    return JSONResponse(content=_ac.from_openai_response(oa, model),
+                        status_code=200, headers=hdr)
 
 
 # ============================================================
