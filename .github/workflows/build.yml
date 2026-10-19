@@ -117,6 +117,58 @@ jobs:
           Stop-Process -Name ([IO.Path]::GetFileNameWithoutExtension($bin.Name)) -Force -ErrorAction SilentlyContinue
           if ($code -ne '200') { exit 1 }
 
+      # Windows 安装包：per-user 安装到 %LOCALAPPDATA%\Programs，不弹 UAC。
+      # 不要改成 Program Files —— 打包版的数据目录就是 exe 所在目录，
+      # 装在只读目录会首启即 PermissionError（见 app.py 的 DATA_DIR 注释）。
+      - name: Build Windows installer (Inno Setup)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          choco install innosetup --no-progress -y | Out-Null
+          $iscc = @(
+            'C:\Program Files (x86)\Inno Setup 6\ISCC.exe',
+            'C:\Program Files\Inno Setup 6\ISCC.exe'
+          ) | Where-Object { Test-Path $_ } | Select-Object -First 1
+          if (-not $iscc) { throw 'ISCC.exe not found after installing Inno Setup' }
+
+          $ver = (Select-String -Path app.py -Pattern 'APP_VERSION\s*=\s*"([^"]+)"').Matches[0].Groups[1].Value
+          $bin = Get-ChildItem dist -Recurse -Filter '*.exe' |
+                 Where-Object { $_.Name -like 'v*' -and $_.Length -gt 1MB } |
+                 Sort-Object Length -Descending | Select-Object -First 1
+          if (-not $bin) { throw 'built exe not found' }
+
+          # 冒烟测试刚结束，文件句柄可能还没释放
+          $target = Join-Path $PWD 'dist\ModelReservoir.exe'
+          foreach ($i in 1..20) {
+            try { Copy-Item $bin.FullName $target -Force; break } catch { Start-Sleep -Milliseconds 500 }
+          }
+          if (-not (Test-Path $target)) { throw "copy failed: $target" }
+
+          & $iscc "/DMyAppVersion=$ver" "/DMyAppExe=$target" 'packaging\windows\model-reservoir.iss'
+          if ($LASTEXITCODE -ne 0) { throw "ISCC failed with exit code $LASTEXITCODE" }
+          $setup = Get-ChildItem dist -Filter '*windows-setup.exe' | Select-Object -First 1
+          if (-not $setup) { throw 'installer not produced' }
+          Write-Host ("installer: {0} ({1:N1} MB)" -f $setup.Name, ($setup.Length / 1MB))
+
+      # macOS 安装包：dmg 里放 .app + /Applications 软链，用户拖过去即安装。
+      # 未签名未公证 → 首次打开仍要右键「打开」或去掉 quarantine 属性。
+      - name: Build macOS dmg
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          set -euo pipefail
+          VER=$(grep -oE 'APP_VERSION = "[^"]+"' app.py | head -1 | cut -d'"' -f2)
+          APP=$(find dist -maxdepth 2 -name '*.app' -type d | head -1)
+          if [ -z "$APP" ]; then echo "::error::.app bundle not found"; exit 1; fi
+          rm -rf dist/dmg && mkdir -p dist/dmg
+          cp -R "$APP" dist/dmg/
+          ln -s /Applications dist/dmg/Applications
+          hdiutil create -volname "模型蓄水池" -srcfolder dist/dmg \
+            -ov -format UDZO "dist/ModelReservoir-v${VER}-macos.dmg"
+          rm -rf dist/dmg
+          ls -lh dist/*.dmg
+
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:

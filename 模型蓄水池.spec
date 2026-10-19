@@ -10,6 +10,14 @@ EXE_NAME = f'v{_ver}-模型蓄水池'
 
 IS_WIN = sys.platform == "win32"
 
+# 应用图标（scripts/make_icon.py 生成）。缺文件时退回 PyInstaller 默认图标，
+# 不让打包因为图标缺失而失败。
+_ICON_ICO = os.path.join('assets', 'icon.ico')
+_ICON_ICNS = os.path.join('assets', 'icon.icns')
+_icon_file = _ICON_ICO if IS_WIN else (_ICON_ICNS if sys.platform == "darwin" else None)
+if _icon_file and not os.path.exists(_icon_file):
+    _icon_file = None
+
 # 跨平台：数据文件与隐藏导入按平台裁剪
 _datas = [('templates', 'templates'), ('models_meta.json', '.')]
 if IS_WIN and os.path.exists('MicrosoftEdgeWebview2Setup.exe'):
@@ -80,12 +88,13 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
+    icon=_icon_file,
 )
 
 if sys.platform == "darwin":
     app = BUNDLE(
         exe,
         name="ModelReservoir.app",
-        icon=None,
+        icon=_ICON_ICNS if os.path.exists(_ICON_ICNS) else None,
         bundle_identifier="com.modelgateway.client",
     )

@@ -93,6 +93,11 @@ python app.py
 
 开机自启写注册表 `HKCU\...\Run`；在线热更新（.exe 替换）为 Windows 独有功能。
 
+**安装包（推荐）**：Release 里的 `ModelReservoir-v<版本>-windows-setup.exe`。
+per-user 安装到 `%LOCALAPPDATA%\Programs\ModelReservoir`，不弹 UAC；
+卸载只删程序，`config.json` / `providers.json` / 用量数据保留。
+不要手动把它装到 `Program Files` —— 打包版的数据目录就是 exe 所在目录，那里不可写。
+
 ## 打包
 
 ```bash
@@ -103,14 +108,17 @@ python app.py
 pyinstaller 模型蓄水池.spec
 ```
 
-spec 文件按平台自动裁剪：Windows 打进 WebView2 安装器与 win32 托盘，macOS 额外产出 `ModelReservoir.app`。
+spec 文件按平台自动裁剪：Windows 走 win32 托盘，macOS 额外产出 `ModelReservoir.app`；
+仓库默认**不**内置 WebView2 安装器（`MicrosoftEdgeWebview2Setup.exe` 存在时才会打进去），
+因此 Windows 依赖系统已有的 WebView2 运行时（Win11 自带，Win10 一般随 Edge 装上）。
+图标由 `scripts/make_icon.py` 生成到 `assets/`（`.ico` / `.icns` / `.png`）。
 
 Linux：`build.sh` 优先用 `.venv-gui`（系统 Python + `--system-site-packages`）打包，spec 检测到本机 gi 类型库就把 Gtk/WebKit2 类型库打进包 → **产物自带原生窗口**（目标机需装 `webkit2gtk-4.1`）；没有 gi 环境则回退 headless 版（浏览器访问）。Linux 系统托盘默认关闭（pystray GTK 与 pywebview 抢主循环会崩）。
 
 ## 测试
 
 ```bash
-python -m pytest tests/ -q    # 29 passed
+python -m pytest tests/ -q    # 全部通过（含更新链、版本门禁、组队同步）
 ```
 
 ## 平台适配说明
@@ -121,7 +129,10 @@ python -m pytest tests/ -q    # 29 passed
 | 杀旧实例 | `netstat`+`taskkill` | `lsof` | `ss` |
 | 开机自启 | 注册表 | LaunchAgent | XDG autostart |
 | GUI | WebView2 | WKWebView | WebKitGTK（缺依赖自动回退浏览器） |
-| 数据目录 | exe 同目录 | Application Support | 运行目录（可用 `GATEWAY_DATA_DIR` 覆盖） |
+| 数据目录 | exe 同目录 | Application Support | exe 同目录 |
+
+> 三端都支持用环境变量 `GATEWAY_DATA_DIR` 指定数据目录（打包版同样生效）——
+> 便携模式、多开测试、把配置放到同步盘都靠它。
 | 在线热更新 | ✅ | 手动更新 | 手动更新 |
 
 环境变量：`GATEWAY_HEADLESS=1`（无头）、`GATEWAY_NO_BROWSER=1`（不自动开浏览器）、`GATEWAY_DATA_DIR`（数据目录）、`GATEWAY_AUTO_KILL=1`（启动时杀旧实例，测试用）。

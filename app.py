@@ -102,7 +102,13 @@ for _stream in (sys.stdout, sys.stderr):
 
 if getattr(sys, 'frozen', False):
     APP_DIR = Path(sys._MEIPASS)
-    if sys.platform == "darwin":
+    # 打包版也认 GATEWAY_DATA_DIR：测试实例、便携模式、多开都靠它
+    # （以前只有开发模式认，打包版强制跟 exe 走，集成测试只能污染 dist/）。
+    _env_data = os.environ.get("GATEWAY_DATA_DIR", "").strip()
+    if _env_data:
+        DATA_DIR = Path(_env_data).expanduser()
+        DATA_DIR.mkdir(parents=True, exist_ok=True)
+    elif sys.platform == "darwin":
         # macOS: .app bundle 内不可写，数据放 Application Support
         DATA_DIR = Path.home() / "Library" / "Application Support" / "ModelGateway"
         DATA_DIR.mkdir(parents=True, exist_ok=True)
@@ -125,7 +131,7 @@ META_FILE = DATA_DIR / "models_meta.json"
 ROUTERS_FILE = DATA_DIR / "routers.json"
 ANNOUNCEMENT_FILE = DATA_DIR / "announcement.json"
 
-APP_VERSION = "1.9.1"
+APP_VERSION = "1.9.2"
 
 MAX_HISTORY_DAYS = 30
 MAX_USAGE_DAYS = 30        # 按天数范围查询(近24小时/7天/30天)的上限
@@ -964,6 +970,15 @@ def is_circuit_open(key: str) -> bool:
     return bool(cb.get("open_until"))
 
 
+def _provider_fault(status: int) -> bool:
+    """这个状态码算不算「上游的错」。
+
+    4xx 里除了 429 都是**请求/配置问题**（参数写错、模型名不存在、key 失效），
+    把它们计入熔断，等于用户自己发了 3 个坏请求就把模型降级 60 秒。
+    """
+    return status >= 500 or status == 429
+
+
 def record_fail(key: str):
     cb = circuit_breaker.setdefault(key, {"fails": 0, "open_until": 0})
     cb["fails"] += 1
@@ -1360,11 +1375,8 @@ def pick_available_models(model: str | None = None, force: bool = False) -> list
             if model and not model_id_matches(model, p["name"], m):
                 continue
             k = f"{p['name']}||{m}"
-            if force or model:
-                # 指定了具体模型或强制重试：仍然分层，但 tier 2 也照收 ——
-                # 显式点名不该被探测历史挡在门外
-                tiers[_tier_of(k)].append((p, m, k))
-                continue
+            # 三层都收进来；下面按 0→1→2 取第一个非空层，
+            # 所以被探测/熔断判死的模型只有在前面全空时才会被用到。
             tiers[_tier_of(k)].append((p, m, k))
 
     # 逐层回退，但**永不返回空列表**：只要还有一个模型，就有候选。
@@ -2279,28 +2291,33 @@ def _looks_like_executable(path: str) -> bool:
     return head[:4] == b"\x7fELF"
 
 
-def _version_gt(a: str, b: str) -> bool:
-    """比较版本号 a > b"""
-    try:
-        pa = [int(x) for x in a.split(".")]
-        pb = [int(x) for x in b.split(".")]
-        while len(pa) < len(pb):
-            pa.append(0)
-        while len(pb) < len(pa):
-            pb.append(0)
-        return pa > pb
-    except Exception:
-        return a.strip() != b.strip()
+_VERSION_RE = re.compile(r"^[vV]?(\d+(?:\.\d+)*)")
 
 
-def _cleanup_old_exe():
-    """启动时清理上次更新遗留的 .old 文件"""
-    old_path = sys.executable + ".old"
-    if os.path.exists(old_path):
-        try:
-            os.remove(old_path)
-        except Exception:
-            pass
+def _parse_version(v):
+    """把 "v1.9.2" / "1.9.2-beta" 解析成 [1,9,2]；空串、None、垃圾返回 None。
+
+    宽松是有意的：预发布后缀（-beta/-rc1）按主版本比较，够用且符合直觉；
+    但**解析不出来时绝不能再退化成「字符串不相等就是新版」** —— 那会让一个
+    空的 / 损坏的 version.json 变成每次启动都弹「发现新版本」。
+    """
+    if not isinstance(v, str):
+        return None
+    m = _VERSION_RE.match(v.strip())
+    if not m:
+        return None
+    return [int(x) for x in m.group(1).split(".")]
+
+
+def _version_gt(a, b) -> bool:
+    """a 严格新于 b 才返回 True。任一侧解析失败一律 False（不提示更新）。"""
+    pa, pb = _parse_version(a), _parse_version(b)
+    if pa is None or pb is None:
+        return False
+    n = max(len(pa), len(pb))
+    pa += [0] * (n - len(pa))
+    pb += [0] * (n - len(pb))
+    return pa > pb
 
 
 @app.get("/api/check-update")
@@ -3110,6 +3127,7 @@ async def _stream_with_failover(candidates, body, is_router, prelude: str = ""):
     async def gen():
         accumulated = ""
         prefix_done = False
+        last_err = ""
         max_attempts = 2 if is_router else 1
 
         if prelude:
@@ -3157,7 +3175,9 @@ async def _stream_with_failover(candidates, body, is_router, prelude: str = ""):
                         pass
                     await resp.aclose()
                     logger.warning("upstream stream error %d from %s", resp.status_code, provider["name"])
-                    record_fail(k)
+                    if _provider_fault(resp.status_code):
+                        record_fail(k)
+                    last_err = f"upstream {resp.status_code}"
                     call_log.append({
                         "time": time.strftime("%H:%M:%S"),
                         "ts": time.time(),  # 前端相对时间显示用
@@ -3256,7 +3276,8 @@ async def _stream_with_failover(candidates, body, is_router, prelude: str = ""):
                         except Exception:
                             pass
 
-        yield "data: " + json.dumps({"choices": [{"delta": {"content": "\n\n⚠️ 所有模型均失败，回复中断。"}, "index": 0}]}, ensure_ascii=False) + "\n\n"
+        tail = "\n\n⚠️ 所有模型均失败（%s），回复中断。" % (last_err or "无可用候选")
+        yield "data: " + json.dumps({"choices": [{"delta": {"content": tail}, "index": 0}]}, ensure_ascii=False) + "\n\n"
         yield "data: [DONE]\n\n"
 
     return StreamingResponse(gen(), media_type="text/event-stream")
@@ -3294,6 +3315,7 @@ async def proxy_chat(request: Request, force: bool = False):
     is_router = requested_model in ROUTERS
     stream = body.get("stream", False)
     last_err = None
+    last_client_error = None   # (status, body) —— 全部失败时原样回传给调用方
 
     if stream:
         return await _stream_with_failover(candidates, body, is_router, prelude=vision_prelude)
@@ -3313,8 +3335,13 @@ async def proxy_chat(request: Request, force: bool = False):
                 resp = await http_client.post(url, json=req_body, headers=headers, timeout=120)
                 if resp.status_code >= 400:
                     logger.warning("upstream %d from %s: %s", resp.status_code, provider["name"], resp.text[:200])
-                    record_fail(k)
+                    if _provider_fault(resp.status_code):
+                        record_fail(k)
                     last_err = f"upstream {resp.status_code}"
+                    if 400 <= resp.status_code < 500:
+                        # 4xx 是请求本身的问题，把上游原话记住：全部候选都失败时原样回传，
+                        # 否则用户只会看到 502「upstream 400」，永远不知道哪个参数错了。
+                        last_client_error = (resp.status_code, resp.text)
                     call_log.append({
                         "time": time.strftime("%H:%M:%S"),
                         "ts": time.time(),  # 前端相对时间显示用
@@ -3410,6 +3437,18 @@ async def proxy_chat(request: Request, force: bool = False):
                     "error": "未知错误",
                 })
                 continue
+
+    if last_client_error is not None:
+        status, raw = last_client_error
+        try:
+            payload = json.loads(raw)
+            if not isinstance(payload, dict):
+                raise ValueError
+        except Exception:
+            payload = {"error": {"message": raw[:2000] or f"upstream {status}",
+                                 "type": "upstream_error", "code": status}}
+        logger.info("all candidates failed with client error %d, passing through", status)
+        return JSONResponse(content=payload, status_code=status)
 
     raise HTTPException(502, f"所有候选模型均失败: {last_err}")
 
@@ -4039,8 +4078,10 @@ if __name__ == "__main__":
     import uvicorn
     import time
 
-    # ---- 清理上次更新的残留文件 ----
-    _cleanup_old_exe()
+    # ---- 注意：这里**故意不删** .old ----
+    # 它是上一版的可执行文件，也是新版本「能启动但用不了」时唯一的手工退路。
+    # 启动时删掉等于把退路提前烧了（误双击第二次也会把它删掉）。
+    # .old 只在下一次更新替换时由 _do_swap_and_restart 清理，始终保留最近一份。
 
     # ---- 读取端口配置 ----
     cfg = load_config()
@@ -4096,10 +4137,10 @@ if __name__ == "__main__":
     # 自动找可用端口（锁拿到了才能安全改 config）
     actual_port = find_available_port(desired_port)
     if actual_port != desired_port:
-        cfg["port"] = actual_port
-        atomic_write(CONFIG_FILE, json.dumps(cfg, indent=2))
-        if not AUTO_KILL:
-            logger.info("端口 %d 被占用，自动使用 %d", desired_port, actual_port)
+        # 不写回配置：端口被占往往是临时的（别的程序正好在用），
+        # 一旦写回就永久改掉，所有按 8000 集成的工具都会静默失效。
+        logger.warning("端口 %d 被占用，本次临时使用 %d（配置仍是 %d）",
+                       desired_port, actual_port, desired_port)
 
     # ---- FastAPI 服务器（daemon 线程） ----
     def start_server(port: int):
@@ -4247,5 +4288,19 @@ if __name__ == "__main__":
     # private_mode 是 pywebview5 的默认值，但会禁用 localStorage/cookies
     # （gtk.py: enable_html5_local_storage=False）→ 主题偏好、页面自诊断全挂，
     # 表现为"点主题按钮没反应/不跟随系统"。本应用需要持久化 UI 偏好 → 关掉。
-    webview.start(private_mode=False)
+    try:
+        webview.start(private_mode=False)
+    except Exception as e:
+        # WebView2 没装 / WebKitGTK 缺库时，pywebview 会在 start() 里抛错，
+        # 甚至直接让进程退出 —— 用户只看到窗口一闪就没，服务也没了。
+        # 这里退化成浏览器模式：服务已经在跑，把页面丢给系统浏览器。
+        logger.exception("GUI 启动失败，回退到浏览器模式：%s", e)
+        print(f"GUI 启动失败（{e}），已切换为浏览器模式：{url}")
+        if os.environ.get("GATEWAY_NO_BROWSER") != "1":
+            try:
+                webbrowser.open(url)
+            except Exception:
+                pass
+        while True:
+            time.sleep(3600)
 
