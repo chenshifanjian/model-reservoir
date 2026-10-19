@@ -5,5 +5,19 @@
   "release_notes": "v1.9.1：**应用内升级不再裸奔** —— 下载会校验、替换会回滚。\n\n## 更新包要校验了\n\n以前下载更新只看 `Content-Length`：网络抖一下、文件传了一半，客户端照样当成成功，\n直接拿去替换正在用的程序。现在每次下载都会**边下边算 SHA256**，落盘后与\n`version.json` 里声明的 `sha256` / `size` 逐字节比对：\n\n- **大小不符** → 判定下载不完整，删掉临时文件，提示重试\n- **SHA256 不符** → 判定文件损坏或来源被替换，同样拒绝安装\n- 校验不通过时，**磁盘上现有的程序一个字节都不动**\n\n替换前还会看一眼文件头（Windows `MZ` / Linux `ELF` / macOS `Mach-O`），\n挡住「下到一个 HTML 错误页」这种情况。\n\n## 替换失败会回滚\n\n原来的替换是三连：改名 → 改名 → 启动新进程 → 立刻退出。中间任何一步失败，\n用户手上就只剩一个打不开的程序。现在**改名失败、新包拉不起来，都会把旧版换回来再报错**。\n最坏的结果是「这次更新没成」，而不是「软件打不开了」。\n\n旧版在替换期间保留为 `*.old`，作为最后的人工兜底。\n\n## 说明\n\n**这一版的校验能力，对「装 1.9.0 及更早版本的人」不生效** —— 老客户端跑的是老代码，\n它不知道自己该校验。要等装上 1.9.1 之后再更新，才走新链路。\n\n顺带修掉一个会让 **Linux 用户下载 404** 的问题：发版脚本把资产名算成 `-linux`，\n实际发布的是 `-linux-x86_64`。\n",
   "download_url_windows": "https://github.com/chenshifanjian/model-reservoir/releases/download/v1.9.1/ModelReservoir-v1.9.1-windows.exe",
   "download_url_linux": "https://github.com/chenshifanjian/model-reservoir/releases/download/v1.9.1/ModelReservoir-v1.9.1-linux-x86_64",
-  "download_url_macos": "https://github.com/chenshifanjian/model-reservoir/releases/download/v1.9.1/ModelReservoir-v1.9.1-macos.zip"
+  "download_url_macos": "https://github.com/chenshifanjian/model-reservoir/releases/download/v1.9.1/ModelReservoir-v1.9.1-macos.zip",
+  "artifacts": {
+    "windows": {
+      "sha256": "0424c8fe72ff3fe41e8f2cb70b3c8a1fa0206ad87fb9cd330c9c3a24efcb24b1",
+      "size": 30548858
+    },
+    "linux": {
+      "sha256": "ff5188114bdf1474e5f3978f4359aa3a9187a3dbad1dd6506c279f2b713eedcc",
+      "size": 176473296
+    },
+    "macos": {
+      "sha256": "4bb1a7f5db41fa60763515f41be857f28abf2df02ee4186ac8571061769c3c0f",
+      "size": 28268704
+    }
+  }
 }
