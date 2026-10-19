@@ -1833,11 +1833,20 @@ function setMmPriceFilter(k) {
 // 用户此刻关心的是"这玩意儿废了"，不是"它免费"。
 function teamSourceBadge(p) {
   const st = p && p.team_status;
-  if (!st || st === 'active') return '';
+  const origin = (p && p.team_origin) || {};
+  const tid = (origin.team_id || '').slice(0, 8);
+  const captain = origin.captain || '';
+  // 有效队伍：只标「来自谁」，让人一眼看出这条不是自己配的
+  if (!st || st === 'active') {
+    if (!tid) return '';
+    const tip = '这个上游来自队伍 ' + tid + '…' +
+      (captain ? '（队长：' + captain + '）' : '') +
+      '\n由队友同步给你，密钥已复制到你机器上。';
+    return `<span class="mm-badge free-unknown" title="${tip.replace(/"/g, '&quot;')}">来自队伍${captain ? '·' + escTeam(captain) : ''}</span>`;
+  }
   const label = { dissolved: '来自已解散队伍', kicked: '来自队伍（你已被移出）',
                   left: '来自队伍（已离开）' }[st] || '来自队伍（已失效）';
-  const tid = ((p.team_origin || {}).team_id || '').slice(0, 8);
-  const captain = (p.team_origin || {}).captain || '';
+  // tid / captain 已在函数开头取过，这里不能再声明（重复 const 是 SyntaxError）
   const tip = '这个上游来自队伍 ' + tid + '…' +
     (captain ? '（队长：' + captain + '）' : '') +
     '\n队伍已失效，模型已全部禁用。记录保留着，你可以在上面的编辑里自行删除。' +
@@ -2808,7 +2817,7 @@ function escTeam(s) {
 }
 
 function teamFmtTs(ts) {
-  if (!ts) return '—';
+  if (!ts) return '永久';   // expires_at=0 是永久队伍，不是「没有数据」
   const d = new Date(ts * 1000);
   return d.getMonth() + 1 + '-' + d.getDate() + ' ' +
     String(d.getHours()).padStart(2, '0') + ':' + String(d.getMinutes()).padStart(2, '0');
@@ -2828,6 +2837,97 @@ async function teamLoad() {
     document.getElementById('teamList').innerHTML =
       '<div class="empty" style="color:var(--danger)">加载组队状态失败</div>';
   }
+}
+
+// 队伍有效期行：永久队伍不再显示一个没意义的日期
+function teamExpiryText(t) {
+  return t.expires_at ? ('有效期至 ' + teamFmtTs(t.expires_at)) : '永久有效（队长可随时轮换组队码或关队）';
+}
+
+// ---------- 共享内容披露 ----------
+// 隐私相关：到底把什么交出去了，必须白纸黑字写清楚，不能只在协议里默认。
+let teamShareOpen = false;
+function teamShareDisclosure() {
+  const rows = [
+    ['已共享', '供应商名称、Base URL、API Key、模型列表、免费标记',
+     '走端到端加密的共享池，协调服务器看不到明文，也不转发对话'],
+    ['已共享', '模型用量与调用记录：时间、模型名、token 数、成功/失败',
+     '<b>不包含任何对话内容</b>，只有数字；用于队内看谁用了多少'],
+    ['不共享', '对话正文、输入输出内容、你本地的配置文件',
+     '这些从不离开你的机器'],
+  ];
+  const body = rows.map(r => `
+    <div style="display:flex; gap:8px; padding:6px 0; border-bottom:1px solid var(--mac-border); font-size:12px;">
+      <span style="width:44px; flex:none; color:${r[0] === '不共享' ? 'var(--success,#16a34a)' : 'var(--warning,#d97706)'}; font-weight:600;">${r[0]}</span>
+      <span style="flex:1;">${r[1]}<div style="color:var(--text-secondary); font-size:11px; margin-top:2px;">${r[2]}</div></span>
+    </div>`).join('');
+  return `<div style="margin-top:10px;">
+    <button class="btn" style="font-size:12px; padding:4px 10px;"
+            onclick="teamShareOpen=!teamShareOpen; renderTeams();">
+      ${teamShareOpen ? '收起' : '同步共享了什么？'}</button>
+    ${teamShareOpen ? `<div style="margin-top:8px; padding:10px 12px; border:1px solid var(--mac-border); border-radius:8px;">
+      <div style="font-size:12px; color:var(--text-secondary); margin-bottom:6px;">
+        同步即把上面这些复制到对方机器上，<b>无法远程收回</b>。以下是本队实际共享的全部内容：</div>
+      ${body}
+      <div style="font-size:11px; color:var(--text-secondary); margin-top:8px;">
+        协调服务器（model-reservoir.heilongxiake.cn）只存密文信箱与上面那些数字统计，解不开你的密钥。</div>
+    </div>` : ''}
+  </div>`;
+}
+
+// ---------- 白名单（队长，opt-out：默认全开） ----------
+let teamAllowCache = {};   // team_id -> {name: bool}
+let teamAllowProv = [];    // [{name, from_team}]，来自 /api/team/sync-allow
+let teamAllowLoaded = false;
+async function teamLoadSyncAllow(teamId) {
+  if (teamAllowLoaded) return teamAllowCache[teamId] || {};
+  try {
+    const r = await apiFetch('/api/team/sync-allow');
+    const d = await r.json();
+    teamAllowCache = d.allow || {};
+    teamAllowProv = d.providers || [];
+    teamAllowLoaded = true;
+  } catch (e) { if (e.message !== 'Unauthorized') console.error(e); }
+  return teamAllowCache[teamId] || {};
+}
+async function teamToggleSyncAllow(teamId, name, enabled) {
+  const cur = Object.assign({}, teamAllowCache[teamId] || {});
+  cur[name] = enabled;
+  try {
+    const r = await apiFetch('/api/team/sync-allow', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ team_id: teamId, allow: cur }),
+    });
+    const d = await r.json();
+    if (d.ok) { teamAllowCache[teamId] = d.allow; renderTeams(); showToast('已更新同步范围', 'ok'); }
+    else showToast(d.error || '设置失败', 'err');
+  } catch (e) { if (e.message !== 'Unauthorized') showToast('设置失败', 'err'); }
+}
+function teamAllowPanel(t) {
+  const all = teamAllowProv;
+  const local = all.filter(x => !x.from_team);   // 只有本地自有的才该出现在开关里
+  const allow = teamAllowCache[t.team_id] || {};
+  if (!teamAllowLoaded) { teamLoadSyncAllow(t.team_id).then(() => renderTeams()); return ''; }
+  if (!local.length) return '';
+  // local 是 [{name, from_team}]，不是字符串数组 —— 直接当字符串用会渲染成 [object Object]
+  const rows = local.map(x => {
+    const n = x.name || '';
+    const on = allow[n] !== false;   // 没写到的一律视为允许（默认全开）
+    return `<label style="display:flex; align-items:center; gap:8px; padding:5px 0; font-size:13px; border-bottom:1px solid var(--mac-border); cursor:pointer;">
+      <input type="checkbox" ${on ? 'checked' : ''}
+             onchange="teamToggleSyncAllow('${escTeam(t.team_id)}', this.dataset.n, this.checked)"
+             data-n="${escHtml(n)}">   <!-- escHtml 已转义 & < > " '，可用于属性上下文 -->
+      <span style="flex:1;">${escHtml(n)}</span>
+      <span style="font-size:11px; color:var(--text-secondary);">${on ? '同步' : '不同步'}</span>
+    </label>`;
+  }).join('');
+  return `<div style="margin-top:12px; padding:12px; border:1px solid var(--mac-border); border-radius:8px;">
+    <div style="font-size:12px; color:var(--text-secondary); margin-bottom:6px;">
+      同步范围（<b>默认全部同步</b>，关掉的不会推给队友）</div>
+    <div style="max-height:200px; overflow:auto;">${rows}</div>
+    <div style="margin-top:8px; font-size:11px; color:var(--text-secondary);">
+      已经推过去的收不回来；关掉只是不再推新的。</div>
+  </div>`;
 }
 
 function renderTeams() {
@@ -2950,12 +3050,14 @@ function teamCard(t) {
     <div style="display:flex; align-items:center; gap:10px; flex-wrap:wrap;">
       <strong style="font-size:14px;">队伍 ${escTeam(t.team_id.slice(0, 8))}…</strong>
       ${teamStatusBadge(t)}
-      <span class="section-hint">有效期至 ${teamFmtTs(t.expires_at)}</span>
+      <span class="section-hint">${t.expires_at ? '有效期至 ' + teamFmtTs(t.expires_at) : '永久有效（可轮换组队码或关队）'}</span>
       <span style="flex:1;"></span>
     </div>
     ${codeBlock}
     ${membersHtml}
     ${syncHtml}
+    ${isCaptain && t.alive ? teamAllowPanel(t) : ''}
+    ${t.alive ? teamShareDisclosure() : ''}
     <div id="teamUsage-${escTeam(t.team_id)}"></div>
     <div style="display:flex; gap:8px; margin-top:12px; flex-wrap:wrap;">${actions.join('')}${usageBtn}</div>
   </div>`;
