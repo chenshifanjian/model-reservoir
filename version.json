@@ -1,23 +1,10 @@
 {
-  "version": "1.9.2",
+  "version": "1.9.3",
   "min_version": "",
-  "release_page": "https://github.com/chenshifanjian/model-reservoir/releases/tag/v1.9.2",
-  "release_notes": "v1.9.2：**Windows 有安装包了，顺手修掉四个会误导人的逻辑 bug**。\n\n## Windows 安装包\n\n新增 `ModelReservoir-v1.9.2-windows-setup.exe`：\n\n- **装到当前用户目录**（`%LOCALAPPDATA%\\Programs\\ModelReservoir`），不弹 UAC\n- 开始菜单、桌面快捷方式（可选）、标准卸载项\n- 卸载**只删程序，保留配置与用量数据**\n- 应用内更新照常可用：它替换的是安装目录里的那个 exe\n\n绿色版单文件 exe 继续提供，两种装法都行 —— 安装包只是省掉「自己建文件夹、自己建快捷方式」。\n\n## 修掉的四个 bug\n\n**1. 空版本号会变成「每次启动都有新版本」**\n旧逻辑在版本号解析失败时退化成「字符串不相等就算新版」。只要 `version.json` 缺 `version`\n字段，每次启动 2 秒后都会弹「发现新版本」，版本号是空的，点了也没法更新。现在解析失败一律\n**不提示更新**。\n\n**2. 上游返回 4xx，用户只看到 502**\n参数写错、模型名不存在、key 失效，原本统统被包成「所有候选模型均失败: upstream 400」。\n现在**把上游的 4xx 原样回传**（状态码 + 原始错误体），调用方终于能看见到底是哪个参数错了。\n5xx 仍然维持 502：上游故障不该伪装成你的错。\n\n**3. 客户端发错请求也会把模型熔断**\n4xx 被计入了熔断器，连续三个坏请求就能让模型降级 60 秒。现在只有 5xx 和 429 才算上游的错。\n\n**4. `*.old` 备份在启动时就被删了**\n它是上一版唯一的退路，旧逻辑却在进程一启动就删掉 —— 连误双击第二次都会把它删没。\n现在启动不再清理，始终保留最近一份，只在下一次更新时替换。\n\n## 还有两处\n\n- **端口冲突不再永久改写配置**：以前占不到 8000 就把 `8001` 写进 `config.json`，之后永远用 8001，\n  所有按 8000 集成的工具静默失效。现在只在本次运行临时换端口。\n- **应用图标**：不再是 PyInstaller 的默认图标。Windows exe、macOS `.app`、安装包都已换。\n\n## 说明\n\nmacOS 包仍是未签名、未公证的：首次打开需要右键「打开」，或执行\n`xattr -dr com.apple.quarantine ModelReservoir.app`。Windows 安装包同样未做 Authenticode 签名，\nSmartScreen 会提示「未知发布者」。\n",
-  "download_url_windows": "https://github.com/chenshifanjian/model-reservoir/releases/download/v1.9.2/ModelReservoir-v1.9.2-windows.exe",
-  "download_url_linux": "https://github.com/chenshifanjian/model-reservoir/releases/download/v1.9.2/ModelReservoir-v1.9.2-linux-x86_64",
-  "download_url_macos": "https://github.com/chenshifanjian/model-reservoir/releases/download/v1.9.2/ModelReservoir-v1.9.2-macos.zip",
-  "artifacts": {
-    "windows": {
-      "sha256": "68e8cf3083a400644ecb5ae5e851fcba4fb3540663a7e1fcd06e8dcbc49bd236",
-      "size": 30519638
-    },
-    "linux": {
-      "sha256": "3d6c6fe2f7792d5a64f2b0bef3ea5fdebf8807de73e528d76838028e69790e25",
-      "size": 176474296
-    },
-    "macos": {
-      "sha256": "9b877c0a29529dfd186699aa292f3a43aa4e5c4cd8d57eb0e248a2ff341ca7d5",
-      "size": 28222375
-    }
-  }
+  "release_page": "https://github.com/chenshifanjian/model-reservoir/releases/tag/v1.9.3",
+  "release_notes": "v1.9.3：**本地 API Key 可以一键随机生成了**。\n\n## 随机本地 Key\n\n上游页「本地接口信息」的 API Key 右边多了一个「随机」按钮：\n\n- 生成 `sk-local-` + 32 位十六进制（16 字节，`secrets.token_hex`），和旧 key 同格式同长度，客户端不用改代码\n- **立即生效**：内存里的 key 一起换，不用重启程序\n- 旧 key **立刻失效且不可找回**，所以是两步确认：第一次点只弹提示，3 秒内再点一次才真换\n- 新 key 自动复制到剪贴板，直接去客户端粘贴\n- 日志只记「已轮换」，不记 key 本身\n\n什么时候用：key 以前贴进过聊天记录、截图、issue，或者本机其他程序能读到 `config.json`，\n轮换一次比逐条排查省事。\n\n注意：换完之后所有已对接的客户端都会收到 401，需要同步改成新 key —— 这也是它要求二次确认的原因。\n",
+  "download_url_windows": "https://github.com/chenshifanjian/model-reservoir/releases/download/v1.9.3/ModelReservoir-v1.9.3-windows.exe",
+  "download_url_linux": "https://github.com/chenshifanjian/model-reservoir/releases/download/v1.9.3/ModelReservoir-v1.9.3-linux-x86_64",
+  "download_url_macos": "https://github.com/chenshifanjian/model-reservoir/releases/download/v1.9.3/ModelReservoir-v1.9.3-macos.zip",
+  "artifacts": {}
 }

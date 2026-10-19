@@ -131,7 +131,7 @@ META_FILE = DATA_DIR / "models_meta.json"
 ROUTERS_FILE = DATA_DIR / "routers.json"
 ANNOUNCEMENT_FILE = DATA_DIR / "announcement.json"
 
-APP_VERSION = "1.9.2"
+APP_VERSION = "1.9.3"
 
 MAX_HISTORY_DAYS = 30
 MAX_USAGE_DAYS = 30        # 按天数范围查询(近24小时/7天/30天)的上限
@@ -162,10 +162,19 @@ def load_config():
     if CONFIG_FILE.exists():
         data = json.loads(CONFIG_FILE.read_text(encoding="utf-8"))
         # 补充缺失的默认字段
-        data.setdefault("local_api_key", "sk-local-" + secrets.token_hex(16))
-        data.setdefault("port", 8000)
-        data.setdefault("poll_count", 0)
-        data.setdefault("last_daily_poll", "")
+        backfilled = False
+        if "local_api_key" not in data:
+            # 补出来的 key 必须落盘。只在内存里 setdefault 的话，每次启动都会
+            # 生成一个新随机 key：文件里没有这个字段，用户看不到任何变化，
+            # 而所有已对接的客户端会莫名其妙全部 401。
+            data["local_api_key"] = "sk-local-" + secrets.token_hex(16)
+            backfilled = True
+        for field, default in (("port", 8000), ("poll_count", 0), ("last_daily_poll", "")):
+            if field not in data:
+                data[field] = default
+                backfilled = True
+        if backfilled:
+            atomic_write(CONFIG_FILE, json.dumps(data, ensure_ascii=False, indent=2))
         return data
     data = {
         "local_api_key": "sk-local-" + secrets.token_hex(16),
@@ -3483,6 +3492,23 @@ async def update_config(request: Request, _=Depends(verify_admin)):
         else:
             raise HTTPException(400, "API Key 不能为空")
     return {"ok": False, "error": "无可更新的字段"}
+
+
+@app.post("/api/local-key/random")
+async def regenerate_local_key(_=Depends(verify_admin)):
+    """生成一个随机本地 API Key 并立即启用（旧 Key 立刻失效，无需重启）。
+
+    用 secrets 而非 random：本机其他进程能读到 config.json 才是主要威胁面，
+    但 key 本身就是凭据，没有理由用可预测的随机源。
+    """
+    global LOCAL_API_KEY
+    new_key = "sk-local-" + secrets.token_hex(16)
+    app_config["local_api_key"] = new_key
+    LOCAL_API_KEY = new_key
+    save_config()
+    # 只记事件不记密钥：日志会被打包、贴进 issue、被同步盘带走
+    logger.info("本地 API Key 已轮换")
+    return {"ok": True, "key": new_key}
 
 
 @app.put("/api/port")

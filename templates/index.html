@@ -1128,6 +1128,7 @@ td .sub-cell { font-size: 11px; color: var(--text-secondary); margin-top: 2px; }
           <span>API Key</span>
           <code id="apiKeyCode" style="flex:0 1 auto;min-width:0;">{{ local_api_key }}</code>
           <span id="apiKeyActions" style="display:inline-flex;align-items:center;gap:4px;flex-shrink:0;margin-left:auto;">
+            <button class="btn-copy" onclick="randomizeApiKey(this)" title="生成一个随机 API Key（旧 Key 立即失效）">随机</button>
             <button class="btn-copy" onclick="editApiKeyHome()">修改</button>
             <button class="btn-copy" onclick="copyText(_currentApiKey, this)">复制</button>
           </span>
@@ -4157,6 +4158,36 @@ function restoreApiKeyDisplay(input, row, btns) {
   code.textContent = _currentApiKey;
   input.replaceWith(code);
   btns.forEach(b => b.style.display = '');
+}
+
+/* 随机 API Key：两步确认（stepConfirm，非 confirm()）——
+   换 key 不是「改个显示」，所有已对接的客户端会在下一次请求收到 401，
+   且无法回滚（旧 key 不落任何地方），所以必须让用户再点一次。 */
+async function randomizeApiKey(btn) {
+  if (!stepConfirm('regen-key',
+      '生成后旧 Key 立即失效，所有已对接的客户端都要改成新 Key。再点一次「随机」确认')) return;
+
+  const label = btn.textContent;
+  btn.disabled = true; btn.textContent = '生成中…';
+  try {
+    const r = await apiFetch('/api/local-key/random', { method: 'POST' });
+    const d = await r.json();
+    if (!d.ok || !d.key) throw new Error(d.error || '生成失败');
+
+    _currentApiKey = d.key;
+    const code = document.getElementById('apiKeyCode');
+    if (code) code.textContent = d.key;
+
+    // 新 key 自动进剪贴板：用户下一步就是去客户端粘贴
+    let copied = false;
+    try { await navigator.clipboard.writeText(d.key); copied = true; } catch (e) {}
+
+    showToast(copied ? '新 Key 已生成并复制到剪贴板' : '新 Key 已生成（复制请点右侧「复制」）', 'ok', 4000);
+  } catch (e) {
+    if (e.message !== 'Unauthorized') showToast('生成失败: ' + e.message, 'error');
+  } finally {
+    btn.disabled = false; btn.textContent = label;
+  }
 }
 
 function editPortInline() {
