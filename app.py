@@ -125,7 +125,7 @@ META_FILE = DATA_DIR / "models_meta.json"
 ROUTERS_FILE = DATA_DIR / "routers.json"
 ANNOUNCEMENT_FILE = DATA_DIR / "announcement.json"
 
-APP_VERSION = "1.9.0"
+APP_VERSION = "1.9.1"
 
 MAX_HISTORY_DAYS = 30
 MAX_USAGE_DAYS = 30        # 按天数范围查询(近24小时/7天/30天)的上限
@@ -2241,6 +2241,44 @@ _update_download_state = {
 }
 
 
+def _assert_download_ok(actual_sha256: str, actual_size: int,
+                        expect_sha256: str, expect_size: int) -> None:
+    """校验下载产物是否与 version.json 声明的一致。不一致抛 ValueError。
+
+    抽成纯函数是为了能直接测「篡改后必须拒绝」，不用起 HTTP 服务。
+    两项都为 0/空时放行（老版 version.json 没有这些字段），但要留日志。
+    """
+    if expect_size and actual_size != expect_size:
+        raise ValueError(
+            f"大小不符：期望 {expect_size} 字节，实际 {actual_size} 字节"
+            f"（下载不完整，或服务器返回的不是完整文件）")
+    if expect_sha256 and actual_sha256.lower() != expect_sha256.lower():
+        raise ValueError(
+            f"SHA256 不符：期望 {expect_sha256[:16]}…，实际 {actual_sha256[:16]}…"
+            f"（文件已损坏，或下载来源被替换）")
+
+
+def _looks_like_executable(path: str) -> bool:
+    """按文件头粗筛「这是不是本平台的可执行文件」。
+
+    主防线是 sha256；这个兜底防的是「下到一个 HTML 错误页 / 下了一半」，
+    那种文件就算没有 sha256 也不该被换上去。
+    """
+    try:
+        with open(path, "rb") as f:
+            head = f.read(4)
+    except Exception:
+        return False
+    if len(head) < 2:
+        return False
+    if sys.platform == "win32":
+        return head[:2] == b"MZ"
+    if sys.platform == "darwin":
+        return head[:4] in (b"\xcf\xfa\xed\xfe", b"\xce\xfa\xed\xfe",
+                            b"\xca\xfe\xba\xbe")
+    return head[:4] == b"\x7fELF"
+
+
 def _version_gt(a: str, b: str) -> bool:
     """比较版本号 a > b"""
     try:
@@ -2280,6 +2318,11 @@ async def check_update(_=Depends(verify_admin)):
             has_update = _version_gt(latest_ver, APP_VERSION)
             min_ver = data.get("min_version", "")
             force_update = bool(min_ver and _version_gt(min_ver, APP_VERSION))
+            # 按平台取产物元信息；老版 version.json 没有 artifacts 就返回空，
+            # 客户端会退化成「不校验」并留告警，不会因为字段缺失就拒绝更新。
+            art = (data.get("artifacts") or {}).get(platform_key()) or {}
+            if not isinstance(art, dict):
+                art = {}
             return {
                 "ok": True,
                 "current": APP_VERSION,
@@ -2292,6 +2335,8 @@ async def check_update(_=Depends(verify_admin)):
                 "min_version": min_ver,
                 "platform": platform_key(),
                 "hot_update": hot_update_supported(),
+                "sha256": (art.get("sha256") or "").lower(),
+                "size": int(art.get("size") or 0),
             }
     except Exception as e:
         logger.warning("check update failed: %s", e)
@@ -2300,7 +2345,10 @@ async def check_update(_=Depends(verify_admin)):
 
 @app.post("/api/start-download")
 async def start_download(data: dict, _=Depends(verify_admin)):
-    """启动后台下载新版 exe，返回后通过 /api/download-progress 轮询进度"""
+    """启动后台下载新版 exe，返回后通过 /api/download-progress 轮询进度。
+
+    sha256 / size 由前端从 /api/check-update 带回 —— 也就是 version.json 声明值。
+    """
     url = data.get("url", "")
     if not url:
         return {"ok": False, "error": "缺少下载地址"}
@@ -2310,37 +2358,56 @@ async def start_download(data: dict, _=Depends(verify_admin)):
         "downloading": True, "progress": 0, "total": 0,
         "done": False, "error": None, "file": None,
     })
-    asyncio.create_task(_do_download(url))
+    sha = (data.get("sha256") or "").strip().lower()
+    try:
+        size = int(data.get("size") or 0)
+    except (TypeError, ValueError):
+        size = 0
+    asyncio.create_task(_do_download(url, sha, size))
     return {"ok": True}
 
 
-async def _do_download(url: str):
-    """后台下载任务，流式写入临时文件，实时更新进度"""
+async def _do_download(url: str, expect_sha256: str = "", expect_size: int = 0):
+    """后台下载任务：流式落盘 + 边下边算 sha256 + 下完校验。
+
+    校验不过一律删文件报错。宁可让用户重试，也不能把截断的包换上去 ——
+    换上去之后用户双击打不开，且旧版已被改名为 .old，很难自己救回来。
+    """
     import tempfile
     # 只取临时文件名，不保持句柄（Windows 下未关闭的句柄会导致后续 open 失败）
     fd, tmp_path = tempfile.mkstemp(suffix=".exe", dir=DATA_DIR)
     os.close(fd)
+    digest = hashlib.sha256()
+    downloaded = 0
     try:
         async with httpx.AsyncClient(timeout=httpx.Timeout(600, connect=15)) as client:
             async with client.stream("GET", url, follow_redirects=True) as resp:
                 if resp.status_code != 200:
                     _update_download_state["error"] = f"下载失败: HTTP {resp.status_code}"
                     _update_download_state["downloading"] = False
+                    os.remove(tmp_path)
                     return
                 content_length = resp.headers.get("content-length")
                 total = int(content_length) if content_length else 0
                 _update_download_state["total"] = total
-                downloaded = 0
                 with open(tmp_path, "wb") as f:
                     async for chunk in resp.aiter_bytes(chunk_size=256 * 1024):
                         f.write(chunk)
+                        digest.update(chunk)
                         downloaded += len(chunk)
                         if total > 0:
                             _update_download_state["progress"] = round(downloaded / total * 100, 1)
+
+        # ---- 完整性校验（不通过就抛，由下面的 except 删文件） ----
+        if not expect_sha256 and not expect_size:
+            logger.warning("version.json 没有为该平台提供 sha256/size，本次更新无法校验完整性")
+        _assert_download_ok(digest.hexdigest(), downloaded, expect_sha256, expect_size)
+
         _update_download_state["done"] = True
         _update_download_state["file"] = tmp_path
         _update_download_state["downloading"] = False
     except Exception as e:
+        logger.warning("更新包校验失败，已丢弃：%s", e)
         _update_download_state["error"] = str(e)
         _update_download_state["downloading"] = False
         try:
@@ -2368,6 +2435,11 @@ async def apply_update(_=Depends(verify_admin)):
     new_file = _update_download_state["file"]
     if not os.path.exists(new_file):
         return {"ok": False, "error": "更新文件不存在"}
+    # 最后一道粗筛：不是本平台可执行文件就不碰磁盘上的现有版本
+    if not _looks_like_executable(new_file):
+        return {"ok": False,
+                "error": "更新文件不是本平台的可执行文件（可能下载不完整，"
+                         "或下载到了错误页面），已拒绝安装，当前版本未受影响"}
     try:
         _do_swap_and_restart(new_file)
     except Exception as e:
@@ -2376,21 +2448,48 @@ async def apply_update(_=Depends(verify_admin)):
 
 
 def _do_swap_and_restart(new_exe: str):
-    """重命名当前 exe → 替换新 exe → 启动新进程 → 退出当前进程"""
+    """重命名当前 exe → 替换新 exe → 启动新进程 → 退出当前进程。
+
+    文件层面的任何失败（改名失败 / 新包不是有效可执行文件 / 进程拉不起来）
+    都回滚到旧 exe。用户最坏的结果是「这次没更新成」，
+    而不是「软件打不开了、还得自己去翻 .old」。
+    """
     import subprocess
     current_exe = sys.executable
     old_exe = current_exe + ".old"
+
     # 1. 删除旧残留
-    if os.path.exists(old_exe):
-        os.remove(old_exe)
-    # 2. 当前 exe 改名为 .old（运行中的 exe 可以改名不能删）
-    os.rename(current_exe, old_exe)
-    # 3. 新 exe 移到当前 exe 位置
-    os.rename(new_exe, current_exe)
+    try:
+        if os.path.exists(old_exe):
+            os.remove(old_exe)
+        # 2. 当前 exe 改名为 .old（运行中的 exe 可以改名不能删）
+        os.rename(current_exe, old_exe)
+        # 3. 新 exe 移到当前 exe 位置
+        os.rename(new_exe, current_exe)
+    except Exception as e:
+        # 改名阶段就失败了：把能恢复的恢复回来，一个文件都别丢
+        if not os.path.exists(current_exe) and os.path.exists(old_exe):
+            try:
+                os.rename(old_exe, current_exe)
+            except Exception:
+                logger.exception("回滚失败，请手工把 %s 改名为 %s", old_exe, current_exe)
+        raise RuntimeError(f"替换文件失败：{e}")
+
     # 4. 启动新 exe
     creationflags = 0x00000008 if sys.platform == "win32" else 0  # DETACHED_PROCESS
-    subprocess.Popen([current_exe], close_fds=True, creationflags=creationflags)
-    # 5. 退出
+    try:
+        subprocess.Popen([current_exe], close_fds=True, creationflags=creationflags)
+    except Exception as e:
+        # 新包根本拉不起来（不是有效 PE / 缺运行库）：换回旧版再报错
+        logger.exception("启动新版本失败，回滚到旧版本")
+        try:
+            os.remove(current_exe)
+            os.rename(old_exe, current_exe)
+        except Exception:
+            logger.exception("回滚失败，请手工把 %s 改名为 %s", old_exe, current_exe)
+        raise RuntimeError(f"新版本无法启动（{e}），已回滚，当前版本可继续使用")
+
+    # 5. 退出（旧版留在 .old，作为最后的人工兜底）
     os._exit(0)
 
 
