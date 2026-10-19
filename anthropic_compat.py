@@ -20,8 +20,13 @@
 from __future__ import annotations
 
 import json
+import logging
 import uuid
 from typing import AsyncIterator
+
+# 本模块刻意不 import app：它只做翻译，不碰网络、不选模型、不记账。
+# 所以得自带一个 logger —— 用 app 的会绕出循环依赖。
+logger = logging.getLogger("reservoir")
 
 # Anthropic stop_reason ⇄ OpenAI finish_reason。
 # 中间值是「两边都没有直接对应」时的兜底，宁可保守也别瞎映射。
@@ -490,7 +495,13 @@ async def sse_to_anthropic(chunks: AsyncIterator[str],
     if has_tool and stop_reason is None:
         stop_reason = "tool_use"
     if stop_reason is None:
-        stop_reason = "end_turn" if text_started else "max_tokens"
+        # 流走完却没有 finish_reason —— 这是异常，不是「被 max_tokens 截断」。
+        # 报 max_tokens 会让客户端以为输出被截断、去续写或重试；
+        # 报 end_turn 至少诚实地说了「它停下来了」。真被截断的场景上游会
+        # 给 finish_reason=length，那条路在上面已经映射好了。
+        if not text_started:
+            logger.warning("anthropic stream ended with no content and no finish_reason")
+        stop_reason = "end_turn"
 
     yield _event("message_delta", {
         "type": "message_delta",

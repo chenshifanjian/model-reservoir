@@ -384,6 +384,37 @@ def test_stream_tool_use_accumulates_json_fragments():
     assert md["delta"]["stop_reason"] == "tool_use"
 
 
+def test_stream_with_no_content_and_no_finish_reason():
+    """空流（无 delta、无 finish_reason）不能报 max_tokens。
+
+    报 max_tokens 会让客户端以为输出被截断、去续写或重试；
+    报 end_turn 至少诚实地说了「它停下来了」。真被截断的场景上游会给
+    finish_reason=length，那条路已单独映射。
+    """
+    raw = asyncio.run(_consume_stream([
+        'data: {"choices":[{"delta":{},"index":0}]}',
+        "",
+        "data: [DONE]",
+    ]))
+    md = [d for n, d in _events(raw) if n == "message_delta"][0]
+    assert md["delta"]["stop_reason"] == "end_turn"
+    names = [n for n, _ in _events(raw)]
+    assert names[-1] == "message_stop"
+
+
+def test_stream_truncated_reports_max_tokens():
+    """上游真的给了 finish_reason=length 时才报 max_tokens —— 别和空流混为一谈。"""
+    raw = asyncio.run(_consume_stream([
+        'data: {"choices":[{"delta":{"content":"半句"},"index":0}]}',
+        "",
+        'data: {"choices":[{"delta":{},"finish_reason":"length","index":0}]}',
+        "",
+        "data: [DONE]",
+    ]))
+    md = [d for n, d in _events(raw) if n == "message_delta"][0]
+    assert md["delta"]["stop_reason"] == "max_tokens"
+
+
 async def _consume_stream(lines) -> str:
     out = []
     async for chunk in ac.sse_to_anthropic(_fake_openai_sse(lines), "m1"):
