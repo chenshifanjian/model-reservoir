@@ -255,8 +255,42 @@ def atomic_write(path: Path, content: str):
 # ============================================================
 def load_config():
     if CONFIG_FILE.exists():
-        data = json.loads(CONFIG_FILE.read_text(encoding="utf-8"))
-        # 补充缺失的默认字段
+        try:
+            data = json.loads(CONFIG_FILE.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+            # 配置坏了不能把软件打回原形。磁盘满、写入中被杀、杀毒软件拦一道、
+            # 或从别的机器拷来一个半截文件，都会留下坏 JSON。
+            # 以前这里直接抛异常 → 模块级崩溃 → 进程静默退出，用户只看到
+            # 「程序打不开」，日志里连 traceback 都不一定找得到（GUI 起不来）。
+            # 现在：坏文件原样留档（里面有用户的上游 Key，绝不能删），
+            # 用默认配置起动，并把线索写进日志与启动失败提示。
+            backup = None
+            try:
+                stamp = time.strftime("%Y%m%d-%H%M%S")
+                backup = CONFIG_FILE.with_name(CONFIG_FILE.name + ".corrupt-" + stamp)
+                CONFIG_FILE.replace(backup)
+            except OSError:
+                backup = None
+            logger.error(
+                "config.json 读不了（%s）。已改用默认配置启动。原文件保留在 %s —— "
+                "里面有你的本地 API Key，想恢复就手工改回去。",
+                exc, backup if backup else CONFIG_FILE)
+            data = None
+        if data is None:
+            pass
+        elif not isinstance(data, dict):
+            # 合法 JSON 但不是对象（比如整个文件写成了 [] 或 "text"）
+            logger.error("config.json 顶层不是 JSON 对象（实际是 %s），改用默认配置启动。",
+                         type(data).__name__)
+            try:
+                stamp = time.strftime("%Y%m%d-%H%M%S")
+                CONFIG_FILE.replace(CONFIG_FILE.with_name(
+                    CONFIG_FILE.name + ".corrupt-" + stamp))
+            except OSError:
+                pass
+            data = None
+        else:
+            # 补充缺失的默认字段
         backfilled = False
         if "local_api_key" not in data:
             # 补出来的 key 必须落盘。只在内存里 setdefault 的话，每次启动都会
