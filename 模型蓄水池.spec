@@ -63,10 +63,42 @@ a = Analysis(
     hookspath=[],
     hooksconfig={},
     runtime_hooks=_runtime_hooks,
-    excludes=['PySide6', 'shiboken6', 'numpy', 'matplotlib', 'scipy', 'pandas', 'PIL._tkinter_finder', 'tkinter', 'unittest', 'test', 'pytest', 'setuptools', 'pkg_resources', 'xmlrpc', 'ensurepip', 'lib2to3'],
+    # excludes：三端 GUI 后端都用不到的东西，实测曾占 21MB（2026-10-20 拆包统计）
+    # - PyQt5/PyQt6 由 pywebview 拖进来（webview/guilib.py 的可选后端）。
+    #   实测后端链：Linux=[gtk, qt]、Windows=[winforms]、macOS=[cocoa, qt] ——
+    #   Qt 在 Windows/macOS 根本不在链上，Linux 也是 gtk 优先；每个 import 都包在
+    #   try/except ImportError 里失败返回 False，所以排除它只会让 fallback 生效，不会崩。
+    # - uvloop 是 uvicorn 的可选 loop，没有它就用默认 asyncio（uvicorn 自己会 ImportError 分支）。
+    #   实测 4MB。
+    excludes=['PySide6', 'shiboken6', 'PyQt5', 'PyQt6', 'PyQt5_sip', 'PyQt6_sip',
+              'pywebview.platforms.qt', 'uvloop',
+              'numpy', 'matplotlib', 'scipy', 'pandas', 'PIL._tkinter_finder', 'tkinter',
+              'unittest', 'test', 'pytest', 'setuptools', 'pkg_resources', 'xmlrpc',
+              'ensurepip', 'lib2to3'],
     noarchive=False,
     optimize=0,
 )
+# 砍掉 PyInstaller 的 GTK hook 收进来的整套系统图标主题（hook-gi.repository.Gtk.py 里的
+# collect_glib_share_files('icons')）。实测 44.27MB / 5 万多个文件，里面还混着
+# ghost-downloader、motrix、heroic、baidunetdisk 等**本机其它应用**的图标 ——
+# 我们自己带图标（assets/icon.ico 进窗口），GTK 运行时用的是主机 /usr/share/icons，
+# 这份副本只在主机一个主题都没有时才用得上，而那不是可用的桌面环境。
+# share/themes（0.46MB，GTK 样式）与 share/locale（6.85MB，GTK 弹窗翻译）刻意保留：
+# 砍 locale 会让文件选择框等原生控件变英文，收益不抵行为变化。
+def _keep_data(entry) -> bool:
+    for part in entry:
+        path = str(part).replace("\\", "/")
+        if path.startswith("share/icons") or "/share/icons" in path:
+            return False
+    return True
+
+_before = len(a.datas)
+a.datas = [d for d in a.datas if _keep_data(d)]
+if _before != len(a.datas):
+    import sys as _sys
+    print(f"[spec] 剔除系统图标数据 {_before - len(a.datas)} 项 "
+          f"（share/icons）", file=_sys.stderr)
+
 pyz = PYZ(a.pure)
 
 exe = EXE(

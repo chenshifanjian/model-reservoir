@@ -6,23 +6,31 @@ ROOT = pathlib.Path(__file__).resolve().parent.parent
 
 
 def test_apply_preset_adds_no_key_platforms(monkeypatch):
-    """needs_key=False 的平台不填 Key 也要能添加 —— 否则卡片是无效控件"""
+    """needs_key=False 的平台不填 Key 也要能添加 —— 否则卡片是无效控件。
+
+    **用合成夹具，不读真实 presets.json**：Ollama / LM Studio 已于 2026-10-20
+    按用户要求从预设移除（见 test_removed_platforms_stay_removed），但
+    `needs_key=false` 这条后端机制仍在 —— 将来要重新引入本机推理平台时它得是好的。
+    机制与预设内容是两件事，分开测。
+    """
     import app as A
     from fastapi.testclient import TestClient
 
-    # 用本地 presets，别打网络
-    local = json.loads((ROOT / "presets.json").read_text("utf-8"))
+    synthetic = {"platforms": {
+        "LocalBox": {"base_url": "http://127.0.0.1:19999/v1",
+                     "needs_key": False, "free_only": False, "models": []},
+        "OpenRouter": {"base_url": "https://openrouter.ai/api/v1",
+                       "needs_key": True, "free_only": False, "models": []},
+    }}
     async def _fake_load(_force=False):
-        return local
+        return synthetic
     monkeypatch.setattr(A, "load_preset", _fake_load)
 
     async def _fake_verify(base_url, key):
         return {"ok": True, "detail": "连接成功"}
     async def _fake_fetch(base_url, key, free_only):
-        if "11434" in base_url:      # Ollama
+        if "19999" in base_url:
             return ["qwen3:8b", "llama3.2:3b"], {}
-        if "1234" in base_url:       # LM Studio
-            return ["qwen3:4b"], {}
         return [], {}
     monkeypatch.setattr(A, "verify_provider_key_impl", _fake_verify)
     monkeypatch.setattr(A, "fetch_models_with_pricing", _fake_fetch)
@@ -35,19 +43,17 @@ def test_apply_preset_adds_no_key_platforms(monkeypatch):
     assert r.status_code == 200, r.text
     res = r.json().get("results", {})
 
-    assert res["Ollama"]["ok"] is True, res.get("Ollama")
-    assert res["LM Studio"]["ok"] is True, res.get("LM Studio")
+    assert res["LocalBox"]["ok"] is True, res.get("LocalBox")
     # 要 Key 的没填，必须仍然失败（不能一起被放行）
     assert res["OpenRouter"]["ok"] is False, res.get("OpenRouter")
     assert "Key" in res["OpenRouter"]["detail"], res["OpenRouter"]
 
     names = {p["name"] for p in A.providers}
-    assert "Ollama" in names, names
-    assert "LM Studio" in names, names
+    assert "LocalBox" in names, names
     assert "OpenRouter" not in names, names
 
-    om = next(p for p in A.providers if p["name"] == "Ollama")
-    assert om["models"] == ["qwen3:8b", "llama3.2:3b"], om
+    lb = next(p for p in A.providers if p["name"] == "LocalBox")
+    assert lb["models"] == ["qwen3:8b", "llama3.2:3b"], lb
     A.providers.clear()
 
 
@@ -60,8 +66,24 @@ def test_preset_sources_stay_in_sync():
     for name in b:
         for field in ("base_url", "needs_key", "free_quota"):
             assert b[name].get(field) == j[name].get(field), (name, field)
-    # 至少要有免 Key 平台，否则「免 Key 开箱即用」整组是空谈
-    assert any(c.get("needs_key") is False for c in j.values())
+
+
+def test_removed_platforms_stay_removed():
+    """2026-10-20 用户要求移除「免 Key，开箱即用」（Ollama / LM Studio）。
+
+    两个来源都必须干净：presets.json 是远端热更新的源（改完就推、客户端长 TTL 后生效），
+    BUILTIN_PRESET 是断网兜底。远端是可热改的，所以这条护栏必须常驻 —— 
+    否则谁在 presets.json 里加回一行，界面就会重新长出这一组，而且没人会注意到。
+    """
+    import app as A
+    j = json.loads((ROOT / "presets.json").read_text("utf-8"))["platforms"]
+    b = A.BUILTIN_PRESET["platforms"]
+    for src_name, src in (("presets.json", j), ("BUILTIN_PRESET", b)):
+        for gone in ("Ollama", "LM Studio"):
+            assert gone not in src, f"{src_name} 里 {gone} 又回来了"
+        # 整组应该已经没有免 Key 平台；若将来重新引入，需同步改这条
+        assert not any(c.get("needs_key") is False for c in src.values()), \
+            f"{src_name} 又出现了 needs_key=False 的平台（若确要恢复免 Key 组，先改这条断言）"
 
 
 def test_auth_headers_omits_header_for_empty_key():

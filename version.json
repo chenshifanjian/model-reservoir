@@ -1,23 +1,10 @@
 {
-  "version": "2.0.1",
+  "version": "2.1.0",
   "min_version": "",
-  "release_page": "https://github.com/chenshifanjian/model-reservoir/releases/tag/v2.0.1",
-  "release_notes": "v2.0.1：修一个把路径问题说成 API Key 问题的坑。\n\n## 问题\n\n只在 `/v1` 下提供服务的 OpenAI 兼容服务器（llama.cpp、Ollama 兼容层、各类自建推理服务），用户按直觉填根地址 `http://host:8080` 时，网关去打 `/models` 会得到 404 —— 而保存前的强制校验把它报成：\n\n```\nAPI Key 校验失败：上游返回 HTTP 404\n```\n\n用户看到「API Key 校验失败」只会反复换 key，而真正该改的是地址。\n\n## 修复\n\n校验时如果根路径 `/models` 返回 404，自动退一次 `/v1/models`：\n\n- 成功 → 归一化 base_url 为带 `/v1` 的形式并**存下来**，下游拼\n  `/models` 与 `/chat/completions` 的六处都不用各自兜底\n- `/v1` 也 401 → 仍然是真的 Key 问题，照旧报「Key 无效」\n- 两个都 404 → 报错改成明确指向路径，并给出正确写法示例\n\n已验证三种填法全部可用：`http://host:8080`、`http://host:8080/`、\n`http://host:8080/v1`。\n",
-  "download_url_windows": "https://github.com/chenshifanjian/model-reservoir/releases/download/v2.0.1/ModelReservoir-v2.0.1-windows.exe",
-  "download_url_linux": "https://github.com/chenshifanjian/model-reservoir/releases/download/v2.0.1/ModelReservoir-v2.0.1-linux-x86_64",
-  "download_url_macos": "https://github.com/chenshifanjian/model-reservoir/releases/download/v2.0.1/ModelReservoir-v2.0.1-macos.zip",
-  "artifacts": {
-    "windows": {
-      "sha256": "9d8dc26ff645e9eb341afa610fa8376d8665c3625466f6c1e1b33ebbd1b97fec",
-      "size": 30555086
-    },
-    "linux": {
-      "sha256": "b6f965348d5c13a4942cdb8b4b9d6500e0d2081358cca3b1b715155738ae5e4c",
-      "size": 176584392
-    },
-    "macos": {
-      "sha256": "7351589700a1c2dd8d80c64cad34f38d6b6a3b561ea2e79bcb12d46b61299ae2",
-      "size": 28257751
-    }
-  }
+  "release_page": "https://github.com/chenshifanjian/model-reservoir/releases/tag/v2.1.0",
+  "release_notes": "v2.1.0：体积减半，两个功能按要求移除，启动不再可能给你一个空窗口。\n\n## 体积：169MB → 96MB（-44%）\n\n拆开二进制逐项统计后砍掉了三样根本用不到的东西：\n\n- **系统图标主题 44.27MB / 52057 个文件** —— PyInstaller 的 GTK hook 把整套 /usr/share/icons 收了进来，里面甚至有 ghost-downloader、motrix、heroic 等**本机其它应用**的图标。我们自己带图标，GTK 运行时用的是主机上的主题。\n- **Qt5/PyQt5/PyQt6 17.66MB** —— pywebview 的可选后端被拖了进来。实测三端后端链：Linux 走 GTK、Windows 走 WinForms、macOS 走 Cocoa，**Qt 根本不在必经路上**，且每个 import 都包在 try/except ImportError 里，排除它只会让 fallback 生效。\n- **uvloop 4.07MB** —— uvicorn 的可选 loop，没有它就用默认 asyncio。\n\n保留：GTK 与 gi typelib、share/locale（砍了文件选择框会变英文）、ICU（13MB，是 GTK 要用的、不是 Qt 拖的）、模板与 PYZ。\n\n## 移除「免 Key，开箱即用」\n\n**Ollama** 与 **LM Studio** 两个预设条目按要求从一键配置移除（presets.json 与内置兜底两处）。分组标题会随空列表自动消失，不用改渲染逻辑。\n\n已加回归护栏：两个来源都不得再出现这两个平台，也不得出现 needs_key=false 的平台 —— 远端 presets.json 是可热改的，否则谁加回一行界面就会重新长出这一组。\n\n## 启动不再静默失败\n\n以前等待服务就绪最多 5 秒，**而且超时也照常开窗**：服务没起来时你会看到一个永远「无法访问」的空窗口，日志里没有任何报错。\n\n现在改成：真的发一个 GET /，必须拿到 200 才开窗；拿不到就**不开死窗口**，而是弹原生提示框，写明日志路径与四条可照做的排查步骤。\n\n**探活探不到的那一层也查了**：探活是直连、不走系统代理，而窗口走系统代理。Windows 默认的 <local> 绕过规则只放过 localhost、**不放过 127.0.0.1**（它有点）——于是服务完全正常、窗口却一直「无法访问」。现在开窗前会读一次 WinINET 代理配置，命中就把具体成因写进日志与提示框（只读，不改你的系统设置）。\n",
+  "download_url_windows": "https://github.com/chenshifanjian/model-reservoir/releases/download/v2.1.0/ModelReservoir-v2.1.0-windows.exe",
+  "download_url_linux": "https://github.com/chenshifanjian/model-reservoir/releases/download/v2.1.0/ModelReservoir-v2.1.0-linux-x86_64",
+  "download_url_macos": "https://github.com/chenshifanjian/model-reservoir/releases/download/v2.1.0/ModelReservoir-v2.1.0-macos.zip",
+  "artifacts": {}
 }

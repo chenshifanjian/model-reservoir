@@ -23,6 +23,7 @@ from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 from fastapi.templating import Jinja2Templates
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from pydantic import BaseModel
+import http.client
 import httpx
 import urllib.parse
 import secrets
@@ -128,6 +129,95 @@ else:
     else:
         DATA_DIR = Path(__file__).parent
 
+LOG_FILE = DATA_DIR / "gateway.log"   # 启动失败时的诊断指引会直接报这个路径
+
+def probe_http(port: int, timeout: float = 2.0) -> int:
+    """GET http://127.0.0.1:{port}/ 拿状态码；连不上/超时/非 HTTP 返回 0。"""
+    conn = None
+    try:
+        conn = http.client.HTTPConnection("127.0.0.1", port, timeout=timeout)
+        conn.request("GET", "/")
+        return conn.getresponse().status
+    except Exception:
+        return 0
+    finally:
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:
+                pass
+
+
+def windows_proxy_hint() -> str:
+    """读 WinINET 代理配置，判断系统代理会不会截获环回请求。非 Windows 或读不到返回 ''。
+
+    只读不改 —— 加不加绕过列表是用户的机器设置，程序不该替他动。
+
+    为什么需要这条：`probe_http` 是直连、**不走系统代理**，所以探活 200 不等于
+    窗口能打开。WebView2/WinForms 走系统代理，而 Windows 默认的 `<local>` 绕过规则
+    只覆盖「主机名里不含点」的地址 —— `localhost` 算，`127.0.0.1` 不算（它有点）。
+    于是服务完全正常、窗口却一直「无法访问」，而日志里查不到任何异常。
+    """
+    if sys.platform != "win32" or winreg is None:
+        return ""
+    try:
+        k = winreg.OpenKey(
+            winreg.HKEY_CURRENT_USER,
+            r"Software\Microsoft\Windows\CurrentVersion\Internet Settings")
+    except OSError:
+        return ""
+
+    def _val(name, default=None):
+        try:
+            return winreg.QueryValueEx(k, name)[0]
+        except OSError:
+            return default
+
+    try:
+        if not _val("ProxyEnable", 0):
+            return ""
+        override = str(_val("ProxyOverride", "") or "").lower()
+        server = str(_val("ProxyServer", "") or "")
+    finally:
+        try:
+            winreg.CloseKey(k)
+        except OSError:
+            pass
+
+    if "127.0.0.1" in override:
+        return ""                      # 已在绕过列表里，代理不碰环回
+    if "<local>" in override:
+        return ("系统代理已开启（" + (server or "地址未列出") + "），绕过规则是 `<local>` —— "
+                "它只放过 localhost、**不放过 127.0.0.1**，而窗口地址正是 http://127.0.0.1:…。"
+                "这很可能就是「服务正常但窗口一直无法访问」的原因："
+                "设置 → 网络和 Internet → 代理 → 例外里加 127.0.0.1")
+    return ("系统代理已开启（" + (server or "地址未列出") + "）且绕过列表不含 127.0.0.1，"
+            "先在代理例外里加 127.0.0.1 再排查其它可能。")
+
+
+def wait_until_ready(port: int, timeout: float = 5.0) -> int:
+    """等本网关在 port 上真的能返回 HTTP 200，返回最后一次的状态码（非 200 即失败）。
+
+    单独提成模块级函数是为了能被单测直接造死端口验证 —— 这个判断以前内联在启动
+    流程里，测不到，于是它的失败分支从没跑过：5 秒等不到就照常开窗，用户看到
+    永远「无法访问」的空窗口而日志里没有任何报错（Windows 上排查过一次）。
+
+    `port_in_use` 只能证明「有人在听」，证明不了「是本网关在听、且 FastAPI 启动
+    事件没抛异常」，所以必须发真请求。
+    """
+    status = 0
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        time.sleep(0.1)
+        status = probe_http(port, timeout=min(2.0, max(0.5, deadline - time.time())))
+        if status == 200:
+            return status
+        if status not in (0, 404):
+            # 端口通了但 HTTP 没就绪 —— 启动事件可能还在跑，也可能炸了，继续等
+            logger.warning("端口 %d 已监听但 GET / 返回 %d，继续等待", port, status)
+    return status
+
+
 DATA_FILE = DATA_DIR / "providers.json"
 CONFIG_FILE = DATA_DIR / "config.json"
 HISTORY_FILE = DATA_DIR / "history.jsonl"
@@ -136,7 +226,7 @@ META_FILE = DATA_DIR / "models_meta.json"
 ROUTERS_FILE = DATA_DIR / "routers.json"
 ANNOUNCEMENT_FILE = DATA_DIR / "announcement.json"
 
-APP_VERSION = "2.0.1"
+APP_VERSION = "2.1.0"
 
 MAX_HISTORY_DAYS = 30
 MAX_USAGE_DAYS = 30        # 按天数范围查询(近24小时/7天/30天)的上限
@@ -2981,25 +3071,9 @@ BUILTIN_PRESET = {
     "updated_at": "2026-10-19",
     "doc_url": PRESET_DOC_URL,
     "platforms": {
-        # ---- 免 key：本机推理，开箱即用 ----
-        "Ollama": {
-            "base_url": "http://127.0.0.1:11434/v1",
-            "free_only": False,
-            "needs_key": False,
-            "free_quota": "无限（吃本机算力）",
-            "key_page_url": "https://ollama.com/download",
-            "auth_hint": "无需 Key，先装 Ollama",
-            "models": [],
-        },
-        "LM Studio": {
-            "base_url": "http://127.0.0.1:1234/v1",
-            "free_only": False,
-            "needs_key": False,
-            "free_quota": "无限（吃本机算力）",
-            "key_page_url": "https://lmstudio.ai/download",
-            "auth_hint": "无需 Key，先装 LM Studio 并开启本地服务",
-            "models": [],
-        },
+        # 2026-10-20 用户要求移除「免 Key，开箱即用」（Ollama / LM Studio）。
+        # needs_key 字段本身保留 —— schema 仍支持，将来若再引入免 key 平台可直接用；
+        # 前端 section() 对空分组返回 ''，所以整段标题会自动消失，不用另改渲染逻辑。
         # ---- 免费注册拿 key（都不绑卡）----
         "OpenRouter": {
             "base_url": "https://openrouter.ai/api/v1",
@@ -4485,13 +4559,59 @@ if __name__ == "__main__":
     t = threading.Thread(target=start_server, args=(actual_port,), daemon=True)
     t.start()
 
-    # ---- 轮询等待服务就绪（每 100ms 检查，最多等 5 秒） ----
-    for _ in range(50):
-        time.sleep(0.1)
-        if port_in_use(actual_port):
-            break
-
     url = f'http://127.0.0.1:{actual_port}/'
+
+    def _startup_error_dialog(text: str) -> None:
+        """启动失败时弹一个**原生**提示框。
+
+        这时不能指望页面或 webview 来显示错误 —— 问题恰恰是页面打不开。
+        Windows 用 MessageBoxW（pywebview 的 WebView2 此时不可用或不该再用），
+        其余平台退化到 stdout（终端启动时看得到，桌面启动也进了日志）。
+        """
+        try:
+            if sys.platform == "win32":
+                import ctypes
+                ctypes.windll.user32.MessageBoxW(
+                    None, text, "模型蓄水池 - 启动失败", 0x10)
+                return
+        except Exception:
+            pass
+        try:
+            print(text, file=sys.stderr)
+        except Exception:
+            pass
+
+    # ---- 就绪校验：必须真的能拿到 HTTP 200，不能只看端口被占 ----
+    # 逻辑在模块级 wait_until_ready()，单独提出来是为了能被单测造死端口验证。
+    ready_status = wait_until_ready(actual_port)
+
+    if ready_status != 200:
+        # 别开一个死窗口。给一条能直接照做的诊断，再按平台弹原生提示。
+        reason = (f"网关服务未能在 5 秒内就绪（端口 {actual_port}，"
+                  f"GET / 状态 {ready_status or '连接失败'}）。")
+        logger.error("%s 详见日志：%s", reason, LOG_FILE)
+        diag = (
+            f"{reason}\n\n"
+            f"日志文件：{LOG_FILE}\n\n"
+            "可依次检查：\n"
+            "1. 日志里是否有端口占用 / 启动异常的报错\n"
+            f"2. 另开一个终端执行：netstat -ano | findstr {actual_port}\n"
+            "3. 代理软件（Clash/FlClash 等）的「绕过代理」里是否包含 127.0.0.1 "
+            "与 localhost —— 系统代理若截获环回请求，窗口会一直显示「无法访问」\n"
+            "4. %LOCALAPPDATA% 下 WebView2 运行时是否完整"
+        )
+        _ph = windows_proxy_hint()
+        if _ph:
+            diag += "\n\n【代理检查】\n" + _ph
+        _startup_error_dialog(diag)
+        # 不开死窗口：回退到浏览器再给一次机会，仍不行就退出（日志有完整原因）
+        try:
+            if os.environ.get("GATEWAY_NO_BROWSER") != "1":
+                webbrowser.open(url)
+        except Exception:
+            pass
+        print(diag)
+        raise SystemExit(1)
 
     # ---- GUI 尝试（可选）：headless 请求 或 GUI 依赖缺失时走浏览器模式 ----
     HEADLESS = (os.environ.get("GATEWAY_HEADLESS") == "1"
@@ -4599,6 +4719,13 @@ if __name__ == "__main__":
                 pass
         while True:
             time.sleep(3600)
+
+    # ---- 开窗前主动查代理 ----
+    # 探活是直连、不走系统代理，所以「服务 200」与「窗口能打开」之间还隔着代理这一层。
+    # 探活通过时也照样查一次：那正是探不到的盲区。
+    _ph = windows_proxy_hint()
+    if _ph:
+        logger.warning("Windows 代理可能截获环回请求：%s", _ph)
 
     # ---- 创建窗口并直接加载页面 ----
     window = webview.create_window(

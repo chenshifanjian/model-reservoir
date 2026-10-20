@@ -3,24 +3,6 @@
   "updated_at": "2026-10-19",
   "doc_url": "https://pv284bk9no6.feishu.cn/wiki/HCOuwXuZGibDUGkWLlpcQuiLnDf",
   "platforms": {
-    "Ollama": {
-      "base_url": "http://127.0.0.1:11434/v1",
-      "free_only": false,
-      "needs_key": false,
-      "free_quota": "无限（吃本机算力）",
-      "key_page_url": "https://ollama.com/download",
-      "auth_hint": "无需 Key，先装 Ollama",
-      "models": []
-    },
-    "LM Studio": {
-      "base_url": "http://127.0.0.1:1234/v1",
-      "free_only": false,
-      "needs_key": false,
-      "free_quota": "无限（吃本机算力）",
-      "key_page_url": "https://lmstudio.ai/download",
-      "auth_hint": "无需 Key，先装 LM Studio 并开启本地服务",
-      "models": []
-    },
     "OpenRouter": {
       "base_url": "https://openrouter.ai/api/v1",
       "free_only": false,
