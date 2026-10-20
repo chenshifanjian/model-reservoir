@@ -1,23 +1,10 @@
 {
-  "version": "2.0.0",
+  "version": "2.0.1",
   "min_version": "",
-  "release_page": "https://github.com/chenshifanjian/model-reservoir/releases/tag/v2.0.0",
-  "release_notes": "v2.0.0：网关从「OpenAI 兼容」变成「双协议兼容」。\n\n升大版本是因为对外的协议面变了，不只是加功能 —— 从这一版起，本网关同时是 OpenAI 兼容端点和 Anthropic 兼容端点。\n\n## Anthropic Messages 面（`/v1/messages`）\n\nClaude Code、Cline 这类只认 Anthropic 线格式的客户端，现在可以直接指向本机网关，不用再绕一层转换，就能用上聚合的免费档。\n\n翻译层走的是**同一条**路由 / 熔断 / 配额 / 前缀注入的路，不是另起一套转发 —— 两套逻辑分头演进是这类网关最常见的腐烂方式。\n\n支持：system、图片（base64 与 URL）、tools / tool_choice（auto/any/tool/none）、tool_use ⇄ tool_calls、tool_result ⇄ tool 消息、stop_sequences、流式全事件序列（message_start → content_block_* → message_delta → message_stop）。不支持的字段（extended thinking、citations）静默丢弃而不是报 400。\n\n配置：Claude Code 指向 `http://127.0.0.1:8001/v1`，API Key 填本机的 `sk-local-…`，模型名用 `供应商/模型名`（与 OpenAI 面同一套命名）。\n\n## 免费档配额账本\n\n以前只有熔断：连错 3 次冷却 60 秒。撞上免费平台的**每日限额**不是故障，是额度用完了 —— 熔断 60 秒后又去撞，撞一整夜。\n\n现在按 (提供方, 模型) 与 (提供方账号) 两层记账：只认 `X-RateLimit-*` 头与 429 响应两种证据，没证据就当无限额度放行；429 按 90s → 2m → 10m → 1h → 1d 阶梯退避；文案点名「每日/配额」的直接避让到 UTC 午夜；**只影响排序，不移除候选**。\n监控页新增「配额冷却」表格（`/api/quota`）。\n\n## X-Routed-Via：说清楚这次是谁回的\n\n网关一直在悄悄换人（识图辅助改派、路由组跨模型切换、候选连不上自动跳过），以前客户端完全不知情。现在每次响应带 `X-Routed-Via` 与 `X-Fallback-Detail`。\n\n## 自 v1.9.3 起\n\n本地 API Key 可一键随机生成（两步确认、免重启、旧 key 当场作废）。\n",
-  "download_url_windows": "https://github.com/chenshifanjian/model-reservoir/releases/download/v2.0.0/ModelReservoir-v2.0.0-windows.exe",
-  "download_url_linux": "https://github.com/chenshifanjian/model-reservoir/releases/download/v2.0.0/ModelReservoir-v2.0.0-linux-x86_64",
-  "download_url_macos": "https://github.com/chenshifanjian/model-reservoir/releases/download/v2.0.0/ModelReservoir-v2.0.0-macos.zip",
-  "artifacts": {
-    "windows": {
-      "sha256": "259a3c14a9347d87fd0102e65bae2dd36ea482e77e169a9d1afbb7e2582463db",
-      "size": 30551570
-    },
-    "linux": {
-      "sha256": "2ca800e6ecc9323ad205346852ab6d242a1a4f0ac2f16fe4b52924eff9cf9abe",
-      "size": 176570336
-    },
-    "macos": {
-      "sha256": "8fe9a4a88a9099211a52994feb69c0ca2fb8270c6bf6ea35b46e7862fd5bb90f",
-      "size": 28256071
-    }
-  }
+  "release_page": "https://github.com/chenshifanjian/model-reservoir/releases/tag/v2.0.1",
+  "release_notes": "v2.0.1：修一个把路径问题说成 API Key 问题的坑。\n\n## 问题\n\n只在 `/v1` 下提供服务的 OpenAI 兼容服务器（llama.cpp、Ollama 兼容层、各类自建推理服务），用户按直觉填根地址 `http://host:8080` 时，网关去打 `/models` 会得到 404 —— 而保存前的强制校验把它报成：\n\n```\nAPI Key 校验失败：上游返回 HTTP 404\n```\n\n用户看到「API Key 校验失败」只会反复换 key，而真正该改的是地址。\n\n## 修复\n\n校验时如果根路径 `/models` 返回 404，自动退一次 `/v1/models`：\n\n- 成功 → 归一化 base_url 为带 `/v1` 的形式并**存下来**，下游拼\n  `/models` 与 `/chat/completions` 的六处都不用各自兜底\n- `/v1` 也 401 → 仍然是真的 Key 问题，照旧报「Key 无效」\n- 两个都 404 → 报错改成明确指向路径，并给出正确写法示例\n\n已验证三种填法全部可用：`http://host:8080`、`http://host:8080/`、\n`http://host:8080/v1`。\n",
+  "download_url_windows": "https://github.com/chenshifanjian/model-reservoir/releases/download/v2.0.1/ModelReservoir-v2.0.1-windows.exe",
+  "download_url_linux": "https://github.com/chenshifanjian/model-reservoir/releases/download/v2.0.1/ModelReservoir-v2.0.1-linux-x86_64",
+  "download_url_macos": "https://github.com/chenshifanjian/model-reservoir/releases/download/v2.0.1/ModelReservoir-v2.0.1-macos.zip",
+  "artifacts": {}
 }

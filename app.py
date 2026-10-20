@@ -136,7 +136,7 @@ META_FILE = DATA_DIR / "models_meta.json"
 ROUTERS_FILE = DATA_DIR / "routers.json"
 ANNOUNCEMENT_FILE = DATA_DIR / "announcement.json"
 
-APP_VERSION = "2.0.0"
+APP_VERSION = "2.0.1"
 
 MAX_HISTORY_DAYS = 30
 MAX_USAGE_DAYS = 30        # 按天数范围查询(近24小时/7天/30天)的上限
@@ -1138,15 +1138,44 @@ async def fetch_models(base_url: str, api_key: str, free_only: bool = True) -> l
 
 
 async def verify_provider_key_impl(base_url: str, api_key: str) -> dict:
-    """校验上游 key 是否有效：调上游 /models 接口，401/403 判定 key 无效"""
-    url = base_url.rstrip("/") + "/models"
+    """校验上游 base_url + api_key 是否可用。
+
+    兼容两种常见写法：`https://host/v1` 与 `https://host`。
+    只在 `/v1` 下提供服务的 OpenAI 兼容服务器（llama.cpp、Ollama 兼容层、
+    各类自建推理服务）如果用户按直觉填了根地址，`/models` 会 404 —— 
+    以前这时报「API Key 校验失败：上游返回 HTTP 404」，把路径问题说成
+    key 的问题，用户只会反复换 key。现在自动退一次 `/v1/models`；
+    成功就在返回里带上归一化后的 base_url，由 add_provider 存下来，
+    下游六处拼 URL（/models ×4、/chat/completions ×2）就都不用各自兜底。
+    """
+    base = base_url.rstrip("/")
     headers = auth_headers(api_key)
+
+    def _404_hint() -> str:
+        return ("上游返回 HTTP 404（/models 不存在）。"
+                "若这是 OpenAI 兼容服务，base_url 请带上 /v1，"
+                f"例如 {base}/v1")
+
     try:
-        resp = await http_client.get(url, headers=headers, timeout=15)
+        resp = await http_client.get(base + "/models", headers=headers, timeout=15)
+
+        if resp.status_code == 404:
+            try:
+                resp_v1 = await http_client.get(base + "/v1/models",
+                                                headers=headers, timeout=15)
+            except Exception:
+                resp_v1 = None
+            if resp_v1 is not None and resp_v1.status_code == 200:
+                return {"ok": True, "detail": "连接成功（已自动补全 /v1）",
+                        "base_url": base + "/v1"}
+            if resp_v1 is not None and resp_v1.status_code in (401, 403):
+                return {"ok": False, "detail": f"Key 无效（HTTP {resp_v1.status_code}）"}
+            return {"ok": False, "detail": _404_hint()}
+
         if resp.status_code in (401, 403):
             return {"ok": False, "detail": f"Key 无效（HTTP {resp.status_code}）"}
         if resp.status_code == 200:
-            return {"ok": True, "detail": "连接成功"}
+            return {"ok": True, "detail": "连接成功", "base_url": base}
         return {"ok": False, "detail": f"上游返回 HTTP {resp.status_code}"}
     except httpx.RequestError as e:
         return {"ok": False, "detail": f"连接失败：{str(e)[:150]}"}
@@ -2607,6 +2636,10 @@ async def add_provider(data: ProviderIn, _=Depends(verify_admin)):
     vr = await verify_provider_key_impl(data.base_url, data.api_key)
     if not vr["ok"]:
         raise HTTPException(400, f"API Key 校验失败：{vr['detail']}")
+    # 上游只在 /v1 下服务时，把 base_url 归一化成带 /v1 的形式存下来。
+    # 只在这里做一次，下游拼 /models、/chat/completions 的六处就都不用兜底。
+    if vr.get("base_url"):
+        data.base_url = vr["base_url"]
     async with providers_lock:
         for p in providers:
             if p["name"] == data.name:
