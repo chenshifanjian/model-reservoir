@@ -6,5 +6,18 @@
   "download_url_windows": "https://github.com/chenshifanjian/model-reservoir/releases/download/v2.1.1/ModelReservoir-v2.1.1-windows.exe",
   "download_url_linux": "https://github.com/chenshifanjian/model-reservoir/releases/download/v2.1.1/ModelReservoir-v2.1.1-linux-x86_64",
   "download_url_macos": "https://github.com/chenshifanjian/model-reservoir/releases/download/v2.1.1/ModelReservoir-v2.1.1-macos.zip",
-  "artifacts": {}
+  "artifacts": {
+    "windows": {
+      "sha256": "647939bd15304762ab08f92ed004843d128f050f1232d0dcfef172c3a742e7a4",
+      "size": 30557845
+    },
+    "linux": {
+      "sha256": "6c9c774845ed05173633445944018349a01991c4dceedc5d22bb9987ff48abb7",
+      "size": 100385128
+    },
+    "macos": {
+      "sha256": "39eb10df21401945234ef9f01fe4d0ecfe756b5f48fd23feae92eabf3623c808",
+      "size": 27618423
+    }
+  }
 }
