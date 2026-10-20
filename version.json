@@ -1,23 +1,10 @@
 {
-  "version": "2.1.0",
+  "version": "2.1.1",
   "min_version": "",
-  "release_page": "https://github.com/chenshifanjian/model-reservoir/releases/tag/v2.1.0",
-  "release_notes": "v2.1.0：体积减半，两个功能按要求移除，启动不再可能给你一个空窗口。\n\n## 体积：169MB → 96MB（-44%）\n\n拆开二进制逐项统计后砍掉了三样根本用不到的东西：\n\n- **系统图标主题 44.27MB / 52057 个文件** —— PyInstaller 的 GTK hook 把整套 /usr/share/icons 收了进来，里面甚至有 ghost-downloader、motrix、heroic 等**本机其它应用**的图标。我们自己带图标，GTK 运行时用的是主机上的主题。\n- **Qt5/PyQt5/PyQt6 17.66MB** —— pywebview 的可选后端被拖了进来。实测三端后端链：Linux 走 GTK、Windows 走 WinForms、macOS 走 Cocoa，**Qt 根本不在必经路上**，且每个 import 都包在 try/except ImportError 里，排除它只会让 fallback 生效。\n- **uvloop 4.07MB** —— uvicorn 的可选 loop，没有它就用默认 asyncio。\n\n保留：GTK 与 gi typelib、share/locale（砍了文件选择框会变英文）、ICU（13MB，是 GTK 要用的、不是 Qt 拖的）、模板与 PYZ。\n\n## 移除「免 Key，开箱即用」\n\n**Ollama** 与 **LM Studio** 两个预设条目按要求从一键配置移除（presets.json 与内置兜底两处）。分组标题会随空列表自动消失，不用改渲染逻辑。\n\n已加回归护栏：两个来源都不得再出现这两个平台，也不得出现 needs_key=false 的平台 —— 远端 presets.json 是可热改的，否则谁加回一行界面就会重新长出这一组。\n\n## 启动不再静默失败\n\n以前等待服务就绪最多 5 秒，**而且超时也照常开窗**：服务没起来时你会看到一个永远「无法访问」的空窗口，日志里没有任何报错。\n\n现在改成：真的发一个 GET /，必须拿到 200 才开窗；拿不到就**不开死窗口**，而是弹原生提示框，写明日志路径与四条可照做的排查步骤。\n\n**探活探不到的那一层也查了**：探活是直连、不走系统代理，而窗口走系统代理。Windows 默认的 <local> 绕过规则只放过 localhost、**不放过 127.0.0.1**（它有点）——于是服务完全正常、窗口却一直「无法访问」。现在开窗前会读一次 WinINET 代理配置，命中就把具体成因写进日志与提示框（只读，不改你的系统设置）。\n",
-  "download_url_windows": "https://github.com/chenshifanjian/model-reservoir/releases/download/v2.1.0/ModelReservoir-v2.1.0-windows.exe",
-  "download_url_linux": "https://github.com/chenshifanjian/model-reservoir/releases/download/v2.1.0/ModelReservoir-v2.1.0-linux-x86_64",
-  "download_url_macos": "https://github.com/chenshifanjian/model-reservoir/releases/download/v2.1.0/ModelReservoir-v2.1.0-macos.zip",
-  "artifacts": {
-    "windows": {
-      "sha256": "782d6183c641f1ef36c8c257acb6ea369054d80dd8404315a45ef511cd3f339b",
-      "size": 30559189
-    },
-    "linux": {
-      "sha256": "f4105c9dbaa6daed359dedfe3d2d2d192ed195ed1411dc505b78e4f536044f74",
-      "size": 100381896
-    },
-    "macos": {
-      "sha256": "77ae64f6e759505d249011bca51afcaa0d365bcd17412d086889ccc41681aa99",
-      "size": 27618807
-    }
-  }
+  "release_page": "https://github.com/chenshifanjian/model-reservoir/releases/tag/v2.1.1",
+  "release_notes": "v2.1.1：把三个能让软件**直接静默崩溃**的场景堵上了。\n\n这三个都不是理论问题 —— 每一个都是拿真故障现场压出来的，改前都能复现：\n\n1. **config.json 读不了**（磁盘满、写入中被杀、杀毒软件拦一道、从别的机器拷来半截文件）\n   → 以前 json.loads 直接抛异常 → 模块级崩溃 → 进程静默退出，用户只看到「程序打不开」。\n   → 现在坏文件**原样改名留档**（config.json.corrupt-时间戳，里面有你的 Key，绝不删），用默认配置启动，并把线索写进日志。\n2. **providers.json 读不了** —— 同样的洞，但代价更贵（里面是全部上游与 Key）\n   → 现在用空列表启动，上游重加即可；坏文件同样留档。\n   注：providers.json 原本已有断电恢复备份，这次补的是「读不了」这条路。\n3. **数据目录不存在**（运行中被删、或 GATEWAY_DATA_DIR 指向未创建的路径）\n   → 以前 atomic_write 抛 FileNotFoundError，进程退出。\n   → 现在写之前先把父目录建出来。\n\n## 新增 8 个测试\n\n含「坏文件必须留档不删」（留档的价值就是让你能手工改回去恢复原来的 Key）、\n「合法 JSON 但不是对象（[] / \"text\" / null）一样不能崩」、\n「正常配置必须原样读回、不被兜底改坏」。\n\n## 五个故障场景的实测结果\n\nconfig.json 损坏 / providers.json 损坏 / 数据目录只读 / 端口被占用 / 数据目录被删 ——\n**进程全部存活**。端口被占用本来就处理得对（临时换空闲端口、配置不改、日志写明），\n目录只读时服务照常可用（只是日志写不进去）。\n",
+  "download_url_windows": "https://github.com/chenshifanjian/model-reservoir/releases/download/v2.1.1/ModelReservoir-v2.1.1-windows.exe",
+  "download_url_linux": "https://github.com/chenshifanjian/model-reservoir/releases/download/v2.1.1/ModelReservoir-v2.1.1-linux-x86_64",
+  "download_url_macos": "https://github.com/chenshifanjian/model-reservoir/releases/download/v2.1.1/ModelReservoir-v2.1.1-macos.zip",
+  "artifacts": {}
 }

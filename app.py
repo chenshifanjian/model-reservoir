@@ -226,7 +226,7 @@ META_FILE = DATA_DIR / "models_meta.json"
 ROUTERS_FILE = DATA_DIR / "routers.json"
 ANNOUNCEMENT_FILE = DATA_DIR / "announcement.json"
 
-APP_VERSION = "2.1.0"
+APP_VERSION = "2.1.1"
 
 MAX_HISTORY_DAYS = 30
 MAX_USAGE_DAYS = 30        # 按天数范围查询(近24小时/7天/30天)的上限
@@ -245,6 +245,9 @@ CALL_LOG_MAX = 10000  # 内存队列事实上无上限（正常使用远达不�
 # 原子写入
 # ============================================================
 def atomic_write(path: Path, content: str):
+    # 父目录可能不存在：用户在运行中把数据目录删了，或 GATEWAY_DATA_DIR 指向一个
+    # 尚未创建的路径。以前这里直接抛 FileNotFoundError → 进程静默退出。
+    path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(path.suffix + ".tmp")
     tmp.write_text(content, encoding="utf-8")
     tmp.replace(path)
@@ -253,58 +256,54 @@ def atomic_write(path: Path, content: str):
 # ============================================================
 # 配置加载
 # ============================================================
+def _quarantine_corrupt(path):
+    """把读不了的文件原样改名留档，返回留档路径（失败返回 None）。
+
+    绝不删除 —— 这两个文件里有用户的上游 Key，删了就真没了。
+    """
+    try:
+        stamp = time.strftime("%Y%m%d-%H%M%S")
+        backup = path.with_name(path.name + ".corrupt-" + stamp)
+        path.replace(backup)
+        return backup
+    except OSError:
+        return None
+
+
 def load_config():
     if CONFIG_FILE.exists():
         try:
             data = json.loads(CONFIG_FILE.read_text(encoding="utf-8"))
-        except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+            assert isinstance(data, dict)
+        except (json.JSONDecodeError, UnicodeDecodeError, AssertionError) as exc:
             # 配置坏了不能把软件打回原形。磁盘满、写入中被杀、杀毒软件拦一道、
             # 或从别的机器拷来一个半截文件，都会留下坏 JSON。
-            # 以前这里直接抛异常 → 模块级崩溃 → 进程静默退出，用户只看到
-            # 「程序打不开」，日志里连 traceback 都不一定找得到（GUI 起不来）。
-            # 现在：坏文件原样留档（里面有用户的上游 Key，绝不能删），
-            # 用默认配置起动，并把线索写进日志与启动失败提示。
-            backup = None
-            try:
-                stamp = time.strftime("%Y%m%d-%H%M%S")
-                backup = CONFIG_FILE.with_name(CONFIG_FILE.name + ".corrupt-" + stamp)
-                CONFIG_FILE.replace(backup)
-            except OSError:
-                backup = None
+            # 以前这里直接抛异常 → 模块级崩溃 → 进程静默退出：用户只看到
+            # 「程序打不开」，日志里连 traceback 都没有（GUI 都没起，日志也未必落盘）。
+            backup = _quarantine_corrupt(CONFIG_FILE)
             logger.error(
-                "config.json 读不了（%s）。已改用默认配置启动。原文件保留在 %s —— "
-                "里面有你的本地 API Key，想恢复就手工改回去。",
+                "config.json 读不了（%s）。已改用默认配置启动，"
+                "本地 API Key 会重新生成。原文件保留在 %s，想恢复就手工改回去。",
                 exc, backup if backup else CONFIG_FILE)
             data = None
-        if data is None:
-            pass
-        elif not isinstance(data, dict):
-            # 合法 JSON 但不是对象（比如整个文件写成了 [] 或 "text"）
-            logger.error("config.json 顶层不是 JSON 对象（实际是 %s），改用默认配置启动。",
-                         type(data).__name__)
-            try:
-                stamp = time.strftime("%Y%m%d-%H%M%S")
-                CONFIG_FILE.replace(CONFIG_FILE.with_name(
-                    CONFIG_FILE.name + ".corrupt-" + stamp))
-            except OSError:
-                pass
-            data = None
-        else:
+
+        if data is not None:
             # 补充缺失的默认字段
-        backfilled = False
-        if "local_api_key" not in data:
-            # 补出来的 key 必须落盘。只在内存里 setdefault 的话，每次启动都会
-            # 生成一个新随机 key：文件里没有这个字段，用户看不到任何变化，
-            # 而所有已对接的客户端会莫名其妙全部 401。
-            data["local_api_key"] = "sk-local-" + secrets.token_hex(16)
-            backfilled = True
-        for field, default in (("port", 8000), ("poll_count", 0), ("last_daily_poll", "")):
-            if field not in data:
-                data[field] = default
+            backfilled = False
+            if "local_api_key" not in data:
+                # 补出来的 key 必须落盘。只在内存里 setdefault 的话，每次启动都会
+                # 生成一个新随机 key：文件里没有这个字段，用户看不到任何变化，
+                # 而所有已对接的客户端会莫名其妙全部 401。
+                data["local_api_key"] = "sk-local-" + secrets.token_hex(16)
                 backfilled = True
-        if backfilled:
-            atomic_write(CONFIG_FILE, json.dumps(data, ensure_ascii=False, indent=2))
-        return data
+            for field, default in (("port", 8000), ("poll_count", 0), ("last_daily_poll", "")):
+                if field not in data:
+                    data[field] = default
+                    backfilled = True
+            if backfilled:
+                atomic_write(CONFIG_FILE, json.dumps(data, ensure_ascii=False, indent=2))
+            return data
+
     data = {
         "local_api_key": "sk-local-" + secrets.token_hex(16),
         "port": 8000,
@@ -321,9 +320,21 @@ def save_config():
 
 
 def load_providers():
-    if DATA_FILE.exists():
-        return json.loads(DATA_FILE.read_text(encoding="utf-8"))
-    return []
+    if not DATA_FILE.exists():
+        return []
+    try:
+        data = json.loads(DATA_FILE.read_text(encoding="utf-8"))
+        assert isinstance(data, list)
+        return data
+    except (json.JSONDecodeError, UnicodeDecodeError, AssertionError) as exc:
+        # providers.json 里是全部上游与 Key —— 比 config.json 更不能一崩了之。
+        # 用空列表起，用户在界面上还能重新加；坏文件留档，key 不丢。
+        backup = _quarantine_corrupt(DATA_FILE)
+        logger.error(
+            "providers.json 读不了（%s）。已用空列表启动，"
+            "上游要重新添加。原文件保留在 %s，想恢复就手工改回去。",
+            exc, backup if backup else DATA_FILE)
+        return []
 
 
 def save_providers(data):
