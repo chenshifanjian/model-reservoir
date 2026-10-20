@@ -24,6 +24,7 @@ from fastapi.templating import Jinja2Templates
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from pydantic import BaseModel
 import http.client
+import traceback
 import httpx
 import urllib.parse
 import secrets
@@ -226,7 +227,7 @@ META_FILE = DATA_DIR / "models_meta.json"
 ROUTERS_FILE = DATA_DIR / "routers.json"
 ANNOUNCEMENT_FILE = DATA_DIR / "announcement.json"
 
-APP_VERSION = "2.1.1"
+APP_VERSION = "2.1.2"
 
 MAX_HISTORY_DAYS = 30
 MAX_USAGE_DAYS = 30        # 按天数范围查询(近24小时/7天/30天)的上限
@@ -248,8 +249,16 @@ def atomic_write(path: Path, content: str):
     # 父目录可能不存在：用户在运行中把数据目录删了，或 GATEWAY_DATA_DIR 指向一个
     # 尚未创建的路径。以前这里直接抛 FileNotFoundError → 进程静默退出。
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(path.suffix + ".tmp")
-    tmp.write_text(content, encoding="utf-8")
+    # tmp 名带 pid：两个进程（升级替换、组队同步）并发写同一个文件时，
+    # 固定名字会让后写者把前写者的 tmp 改名覆盖掉，读者可能拿到半截内容。
+    tmp = path.with_name(f"{path.name}.{os.getpid()}.tmp")
+    with open(tmp, "w", encoding="utf-8") as fh:
+        fh.write(content)
+        # fsync 到磁盘再 rename。断电时没有它，rename 可能先于数据落盘 ——
+        # 文件名已换、内容还是空的。这正是 config.json/providers.json 变成
+        # 半截 JSON 并让启动崩掉的来源之一。
+        fh.flush()
+        os.fsync(fh.fileno())
     tmp.replace(path)
 
 
@@ -339,6 +348,15 @@ def load_providers():
 
 def save_providers(data):
     atomic_write(DATA_FILE, json.dumps(data, ensure_ascii=False, indent=2))
+    # 模型列表缓存必须在这里失效，而不是散落到每个调用点：增删上游、改禁用列表、
+    # 组队同步合并都会改 providers，而以前唯一失效点在「改模型能力」那条路上 ——
+    # 于是增删上游后 30 秒内 GET /v1/models 仍返回已删掉的模型，
+    # 客户端选中它就直接 504/404。放在这里，将来新加的写点也漏不掉。
+    # 用 globals().get：本函数在模块导入早期就会被调用，而 _models_cache
+    # 定义在文件更靠后，直接引用会在导入期 NameError。
+    cache = globals().get("_models_cache")
+    if cache is not None:
+        cache["data"] = None
 
 
 def load_meta():
@@ -374,11 +392,29 @@ def load_meta():
 
 
 def load_routers():
+    """路由表：{组名: [成员模型名]}。读不了就退回空表，不能把进程打崩。
+
+    只 catch JSONDecodeError 不够 —— `null`、`[1,2,3]` 都是**合法 JSON**，
+    但顶层不是对象，后面 `set(ROUTERS[model])` 会直接 TypeError，
+    结果是 /v1/models 与 /v1/chat/completions 全 500 且重启依旧。
+    """
     if ROUTERS_FILE.exists():
         try:
-            return json.loads(ROUTERS_FILE.read_text(encoding="utf-8"))
-        except json.JSONDecodeError:
-            pass
+            data = json.loads(ROUTERS_FILE.read_text(encoding="utf-8"))
+            assert isinstance(data, dict)
+            # 逐条消毒：值必须是字符串列表，否则下游 set()/遍历会炸
+            # 注意条件必须判**成员** m，不是列表 v —— 判 v 会把 1/None
+            # 无条件 str() 成 "1"/"None"，等于把垃圾模型名放进来。
+            cleaned = {str(k): [m for m in v if isinstance(m, str)]
+                       for k, v in data.items() if isinstance(v, list)}
+            if len(cleaned) != len(data):
+                logger.error("routers.json 有 %d 条形状不对（值不是字符串列表），已跳过",
+                             len(data) - len(cleaned))
+            return cleaned
+        except (json.JSONDecodeError, UnicodeDecodeError, AssertionError) as exc:
+            backup = _quarantine_corrupt(ROUTERS_FILE)
+            logger.error("routers.json 读不了（%s）。已用空表启动，路由要重新配。原文件保留在 %s。",
+                         exc, backup if backup else ROUTERS_FILE)
     return {}
 
 def save_routers():
@@ -1440,6 +1476,36 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="模型API网关", lifespan=lifespan)
 templates = Jinja2Templates(directory=str(APP_DIR / "templates"))
+
+
+@app.exception_handler(Exception)
+async def _unhandled_exception(request: Request, exc: Exception):
+    """任何漏网异常都要返回**本协议形状**的错误体，而不是 FastAPI 的默认 500。
+
+    为什么值得单独一条：OpenAI 客户端只认 `error.message`，Anthropic 客户端
+    只认 `type=error / error.type / error.message`。默认 500 的纯文本让调用方
+    既看不出原因也无从重试 —— 在本项目里具体表现为上游返回畸形数据时，
+    UI 上只有一句没有信息量的「请求失败」，而日志里也没有归因。
+
+    注意：这**不是**掩盖 bug 的静默兜底。堆栈完整写进日志（见下），
+    返回给客户端的只有异常类型与消息，不含本地路径与密钥。
+    """
+    path = request.url.path
+    detail = f"{type(exc).__name__}: {exc}"
+    logger.error("未捕获异常 %s %s → 500：%s\n%s",
+                 request.method, path, detail,
+                 "".join(traceback.format_exception(type(exc), exc, exc.__traceback__)))
+    if path.startswith("/v1/messages"):
+        # Anthropic 形状
+        payload = {"type": "error",
+                   "error": {"type": "api_error", "message": detail}}
+    elif path.startswith("/v1/"):
+        # OpenAI 形状
+        payload = {"error": {"message": detail, "type": "server_error",
+                             "code": "internal_error"}}
+    else:
+        payload = {"ok": False, "error": detail}
+    return JSONResponse(status_code=500, content=payload)
 templates.env.auto_reload = True
 
 
@@ -2345,11 +2411,31 @@ async def update_model_capability(req: CapabilityUpdate, _=Depends(verify_admin)
 
 @app.post("/api/routers")
 async def save_routers_api(request: Request, _=Depends(verify_admin)):
+    """保存路由表。形状必须是 {组名: [成员模型名]} —— 落盘前校验。
+
+    以前 body 不校验就直接 `ROUTERS = body; save_routers()`：POST 一个
+    `null` 或 `{"p": 123}` 会返回 200 并**持久化**，之后该组名下的所有请求
+    都 500，重启照样复现 —— 一个请求制造出无法自愈的坏状态。
+    """
     global ROUTERS
-    body = await request.json()
-    ROUTERS = body
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="请求体不是合法 JSON")
+    if not isinstance(body, dict):
+        raise HTTPException(
+            status_code=400,
+            detail=f"路由表顶层必须是对象（组名 → 成员模型列表），实际是 {type(body).__name__}")
+    bad = [k for k, v in body.items() if not isinstance(v, list)]
+    if bad:
+        raise HTTPException(
+            status_code=400,
+            detail=f"这些组的成员不是列表：{bad[:5]}")
+    ROUTERS = {str(k): [m for m in v if isinstance(m, str) and m.strip()]
+               for k, v in body.items()}
     save_routers()
-    return {"ok": True}
+    _models_cache["data"] = None      # 路由变了，模型列表缓存立即失效
+    return {"ok": True, "groups": len(ROUTERS)}
 
 
 @app.get("/api/vision-models")
@@ -3315,6 +3401,11 @@ def _inject_cn_hint(body: dict):
                 for part in content:
                     if isinstance(part, dict) and part.get("type") == "text":
                         t = part.get("text", "")
+                        # 上游/客户端可能把 text 填成数字或对象 —— not in 比较会
+                        # TypeError，而这条在识图分支上，一崩就是整个请求 500
+                        if not isinstance(t, str):
+                            t = str(t) if t is not None else ""
+                            part["text"] = t
                         if CN_HINT not in t:
                             part["text"] = t + "\n" + CN_HINT
                         break
@@ -3637,8 +3728,14 @@ async def proxy_chat(request: Request, force: bool = False):
             vision_prelude = "🖼️ 已切换到视觉模型回复…\n\n"
             # 识图模型 max_tokens 上限较低（部分仅 32768），避免客户端传的百万级值导致 upstream 400
             for key in ("max_tokens", "max_completion_tokens"):
-                if body.get(key, 0) > 16384:
-                    body[key] = 16384
+                _val = body.get(key)
+                # 客户端可能传 "99999" 这样的字符串或 null：直接比较会 TypeError
+                # → 500。非数字就删掉，让上游按自己的默认值处理。
+                if isinstance(_val, (int, float)) and not isinstance(_val, bool):
+                    if _val > 16384:
+                        body[key] = 16384
+                elif _val is not None:
+                    body.pop(key, None)
             # 部分识图模型忽略 system prompt，把中文指令直接注入用户消息末尾
             _inject_cn_hint(body)
         else:
@@ -3850,7 +3947,11 @@ async def regenerate_local_key(_=Depends(verify_admin)):
 async def update_port(request: Request, _=Depends(verify_admin)):
     """更新端口并触发重启"""
     body = await request.json()
-    new_port = int(body.get("port", 8000))
+    try:
+        new_port = int(body.get("port", 8000))
+    except (TypeError, ValueError):
+        # 传 "abc" 以前直接抛 → 500；端口是用户输入，必须 400 带可读理由
+        raise HTTPException(400, "port 必须是数字")
     if new_port < 1024 or new_port > 65535:
         raise HTTPException(400, "端口号范围: 1024-65535")
     app_config["port"] = new_port
@@ -4088,7 +4189,16 @@ async def anthropic_messages(request: Request):
     if not body.get("messages"):
         return _anthropic_error(400, "messages: field required")
 
-    oa_body = _ac.to_openai_request(body)
+    # 翻译层对畸形内容会抛（text 块不是字符串时 "".join 抛 TypeError）。
+    # 这里必须自己接住 —— 抛出去会被 FastAPI 的默认处理转成**非 Anthropic
+    # 形状**的 500，客户端拿不到 error.type 就不知道该不该重试。
+    # 正下方那段注释说的就是这件事，只是当时漏了自己这一行。
+    try:
+        oa_body = _ac.to_openai_request(body)
+    except Exception as exc:
+        logger.warning("Anthropic 面请求翻译失败：%s: %s", type(exc).__name__, exc)
+        return _anthropic_error(
+            400, f"request body is invalid: {type(exc).__name__}: {exc}")
     stream = bool(body.get("stream"))
     oa_body["stream"] = stream
 
