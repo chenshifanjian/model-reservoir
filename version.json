@@ -1,23 +1,10 @@
 {
-  "version": "1.10.0",
+  "version": "2.0.0",
   "min_version": "",
-  "release_page": "https://github.com/chenshifanjian/model-reservoir/releases/tag/v1.10.0",
-  "release_notes": "v1.10.0：免费额度不再靠撞墙来发现，Claude Code 也能接进来了。\n\n## 配额账本（免费档终于知道自己还剩多少额度）\n\n以前网关只有熔断：连错 3 次冷却 60 秒。但撞上免费平台的**每日限额**不是故障，是额度用完了 —— 熔断 60 秒后又去撞，撞一整夜。\n\n现在按 (提供方, 模型) 和 (提供方账号) 两层记账：\n\n- **只认证据，不猜上限。** 证据只有上游的 `X-RateLimit-*` 头和 429 响应两种，没有证据就当无限额度放行。\n- 429 按 90s → 2m → 10m → 1h → 1d 阶梯退避，成功一次退一格。\n- 文案里点名「每日/配额」的 429，直接避让到 **UTC 午夜**（免费平台几乎都按 UTC 自然日重置）。\n- `Retry-After` 头优先。\n- **只影响排序，不移除候选。** 全部候选都在冷却时照样返回，让请求有机会撞一次。\n\n监控页新增「配额」接口（`/api/quota`），能看到哪些候选因为额度在冷却、还要多久。\n\n## X-Routed-Via：说清楚这次是谁回的\n\n网关一直在悄悄换人 —— 识图辅助会改派路由组、路由组会跨模型切换、某个候选连不上会自动跳过。以前客户端完全不知情，只会觉得「回答风格怎么变了」。\n\n现在每次响应带两个头：\n\n- `X-Routed-Via: 供应商/模型 (upstream: 上游模型名)` —— 实际回复的那个\n- `X-Fallback-Detail: 供应商A/模型: upstream-429; …` —— 中间跳过了谁、为什么\n\n中文提供方名会自动百分号编码，不会因为一个中文字发出非法头。\n（注意：响应头在第一个字节发出前就定死了，所以**流中途降级改不了头** —— 这时头写的是最初选中的人，正文是后面接上的，从 Fallback-Detail 能看出跳过了谁。）\n\n## Anthropic Messages 面：Claude Code 直接连本机网关\n\n`POST /v1/messages` 现在可用了。Claude Code、Cline 这类只认 Anthropic 线格式的客户端，不用再绕一层转换就能用上咱们聚合的免费档。\n\n翻译层走的是**同一条**路由/熔断/配额/前缀注入的路，不是另起一套转发 —— 两套逻辑分头演进是这类网关最常见的腐烂方式。\n\n支持：system、图片（base64 与 URL）、tools / tool_choice（auto/any/tool/none）、tool_use ⇄ tool_calls、tool_result ⇄ tool 消息、stop_sequences、流式全事件序列（message_start → content_block_* → message_delta → message_stop）。\n不支持的字段（extended thinking、citations）静默丢弃而不是报 400。\n\n配置方式：把 Claude Code 指向 `http://127.0.0.1:8001/v1`，API Key 填本机的 `sk-local-…`，模型名用 `供应商/模型名`（和 OpenAI 面同一套命名）。\n",
-  "download_url_windows": "https://github.com/chenshifanjian/model-reservoir/releases/download/v1.10.0/ModelReservoir-v1.10.0-windows.exe",
-  "download_url_linux": "https://github.com/chenshifanjian/model-reservoir/releases/download/v1.10.0/ModelReservoir-v1.10.0-linux-x86_64",
-  "download_url_macos": "https://github.com/chenshifanjian/model-reservoir/releases/download/v1.10.0/ModelReservoir-v1.10.0-macos.zip",
-  "artifacts": {
-    "windows": {
-      "sha256": "a5397f16cda8e2b8ed8c59e693b652422a6d06767e7e3aefba303870116d12e3",
-      "size": 30551224
-    },
-    "linux": {
-      "sha256": "cfa5ad0edbf75474e0a183518abdddae73c39c48dcd71605d22e1590bd4e6b72",
-      "size": 176582896
-    },
-    "macos": {
-      "sha256": "095f49b8a235dffcc45552eea45516c9d8cc69bf91087ca8455f18371c49f2ef",
-      "size": 28257610
-    }
-  }
+  "release_page": "https://github.com/chenshifanjian/model-reservoir/releases/tag/v2.0.0",
+  "release_notes": "v2.0.0：网关从「OpenAI 兼容」变成「双协议兼容」。\n\n升大版本是因为对外的协议面变了，不只是加功能 —— 从这一版起，本网关同时是 OpenAI 兼容端点和 Anthropic 兼容端点。\n\n## Anthropic Messages 面（`/v1/messages`）\n\nClaude Code、Cline 这类只认 Anthropic 线格式的客户端，现在可以直接指向本机网关，不用再绕一层转换，就能用上聚合的免费档。\n\n翻译层走的是**同一条**路由 / 熔断 / 配额 / 前缀注入的路，不是另起一套转发 —— 两套逻辑分头演进是这类网关最常见的腐烂方式。\n\n支持：system、图片（base64 与 URL）、tools / tool_choice（auto/any/tool/none）、tool_use ⇄ tool_calls、tool_result ⇄ tool 消息、stop_sequences、流式全事件序列（message_start → content_block_* → message_delta → message_stop）。不支持的字段（extended thinking、citations）静默丢弃而不是报 400。\n\n配置：Claude Code 指向 `http://127.0.0.1:8001/v1`，API Key 填本机的 `sk-local-…`，模型名用 `供应商/模型名`（与 OpenAI 面同一套命名）。\n\n## 免费档配额账本\n\n以前只有熔断：连错 3 次冷却 60 秒。撞上免费平台的**每日限额**不是故障，是额度用完了 —— 熔断 60 秒后又去撞，撞一整夜。\n\n现在按 (提供方, 模型) 与 (提供方账号) 两层记账：只认 `X-RateLimit-*` 头与 429 响应两种证据，没证据就当无限额度放行；429 按 90s → 2m → 10m → 1h → 1d 阶梯退避；文案点名「每日/配额」的直接避让到 UTC 午夜；**只影响排序，不移除候选**。\n监控页新增「配额冷却」表格（`/api/quota`）。\n\n## X-Routed-Via：说清楚这次是谁回的\n\n网关一直在悄悄换人（识图辅助改派、路由组跨模型切换、候选连不上自动跳过），以前客户端完全不知情。现在每次响应带 `X-Routed-Via` 与 `X-Fallback-Detail`。\n\n## 自 v1.9.3 起\n\n本地 API Key 可一键随机生成（两步确认、免重启、旧 key 当场作废）。\n",
+  "download_url_windows": "https://github.com/chenshifanjian/model-reservoir/releases/download/v2.0.0/ModelReservoir-v2.0.0-windows.exe",
+  "download_url_linux": "https://github.com/chenshifanjian/model-reservoir/releases/download/v2.0.0/ModelReservoir-v2.0.0-linux-x86_64",
+  "download_url_macos": "https://github.com/chenshifanjian/model-reservoir/releases/download/v2.0.0/ModelReservoir-v2.0.0-macos.zip",
+  "artifacts": {}
 }
