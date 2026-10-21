@@ -5,6 +5,23 @@
   "release_notes": "v2.1.3：新增「回复标注来源」开关 —— 为了接入 Hermes 这类第三方客户端。\n\n## 为什么要这个开关\n\n网关会在每条回复开头注入 `🤖 供应商/模型`，方便排查「到底谁答的」。这个行为一直写死在代码里、没有开关。当你把网关接进别的客户端（比如 Hermes、各种 IDE 插件、OpenAI SDK 应用），前缀会出现在**对方每一条回复的开头** —— 既占 token，又让对话看起来脏。\n\n## 新增\n\n上游页 API Key 那一栏下面加了「回复标注来源」一行，显示当前 开/关，点「切换」即改。\n- **默认开**，与加开关前完全一致，不影响任何现有用法\n- **立即生效，不用重启** —— 已经在跑的第三方客户端下一条回复就不带前缀了\n- 流式与非流式两条路都接了开关。漏一条就会出现「有时有前缀有时没有」，那更难查\n- 视觉切换提示（`🖼️ 已切换到视觉模型回复…`）**不受开关影响** —— 它是功能性标记，不是装饰，关掉标注来源不应该让客户端丢掉这个信息\n\n## 两个刻意的决定\n\n1. **`PUT /api/config` 严格要求布尔值**：传 `\"false\"` 这种字符串会被 400 拒绝。如果用 `if val:` 判真假，字符串 `\"false\"` 会被当成 True 存下去，而界面回读时显示成「开」—— 用户点关点不动，而且不知道为什么。\n2. **只有明确的 `False` 才关**：`\"\"`、`0`、`None` 这类被写坏的值一律回到默认（开）。否则一个坏值会让所有回复悄悄丢掉来源标注，而用户在界面上看不出原因。\n\n## 验证\n\n280 单元测试（新增 11 例），含「切开关不能顺手改掉 API Key」（那会让所有已对接的客户端 401）与「界面回读必须拿到真实开关状态」。\n",
   "download_url_windows": "https://github.com/chenshifanjian/model-reservoir/releases/download/v2.1.3/ModelReservoir-v2.1.3-windows.exe",
   "download_url_linux": "https://github.com/chenshifanjian/model-reservoir/releases/download/v2.1.3/ModelReservoir-v2.1.3-linux-x86_64",
-  "download_url_macos": "https://github.com/chenshifanjian/model-reservoir/releases/download/v2.1.3/ModelReservoir-v2.1.3-macos.zip",
-  "artifacts": {}
+  "download_url_macos": "https://github.com/chenshifanjian/model-reservoir/releases/download/v2.1.2/ModelReservoir-v2.1.2-macos.zip",
+  "artifacts": {
+    "linux": {
+      "url": "https://github.com/chenshifanjian/model-reservoir/releases/download/v2.1.3/ModelReservoir-v2.1.3-linux-x86_64",
+      "sha256": "20a55a2581d72987f3268b3894d8d6d7316b8d6e77295b885329674e61362761",
+      "size": 100390072
+    },
+    "windows": {
+      "url": "https://github.com/chenshifanjian/model-reservoir/releases/download/v2.1.3/ModelReservoir-v2.1.3-windows.exe",
+      "sha256": "bf152e9fc1dab687ed45c4601fc793a05b37b8f6b64c2dbea7f4e271f95bfaeb",
+      "size": 30571877
+    },
+    "macos": {
+      "url": "https://github.com/chenshifanjian/model-reservoir/releases/download/v2.1.2/ModelReservoir-v2.1.2-macos.zip",
+      "sha256": "39eb10df21401945234ef9f01fe4d0ecfe756b5f48fd23feae92eabf3623c808",
+      "size": 27623479,
+      "pending": true
+    }
+  }
 }

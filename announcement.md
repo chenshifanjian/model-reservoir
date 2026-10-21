@@ -48,3 +48,12 @@
 
 - **切开关不能顺手改掉 API Key** —— 那会让所有已对接的客户端 401
 - **界面回读必须拿到真实开关状态** —— 否则界面永远显示「开」
+
+## 本版资产说明：macOS 暂缺
+
+macOS runner 连续三次领不到活（Windows 与 Ubuntu 都在 2 分钟内完成，macOS 排队
+15 分钟后被取消）。本版先发 **Linux 与 Windows**（含 Windows 安装包）。
+
+`version.json` 里的 macOS 地址指回 **v2.1.2 那个真实存在的资产**，
+所以现有 macOS 用户只会看到「没有更新」，不会去下载一个 404。
+等 macOS runner 空出来会补跑并把 dmg / zip 挂到本 release 下。
