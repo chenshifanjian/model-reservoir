@@ -1153,6 +1153,13 @@ td .sub-cell { font-size: 11px; color: var(--text-secondary); margin-top: 2px; }
             <button class="btn-copy" onclick="copyText(_currentApiKey, this)">复制</button>
           </span>
         </div>
+        <div class="copy-row" style="align-items:center;">
+          <span title="每条回复开头标注「🤖 供应商/模型」，方便排查到底谁答的。接入 Hermes 等第三方客户端时建议关掉 —— 前缀会出现在对方每一条回复里，既占 token 又显得乱">回复标注来源</span>
+          <code id="prefixState">{{ '开' if show_model_prefix else '关' }}</code>
+          <span style="display:inline-flex;align-items:center;gap:4px;flex-shrink:0;margin-left:auto;">
+            <button class="btn-copy" onclick="toggleModelPrefix(this)">切换</button>
+          </span>
+        </div>
       </div>
       <script>
         document.getElementById('localBaseUrl').innerText = window.location.protocol + "//" + window.location.host + "/v1";
@@ -4249,6 +4256,31 @@ function restoreApiKeyDisplay(input, row, btns) {
 /* 随机 API Key：两步确认（stepConfirm，非 confirm()）——
    换 key 不是「改个显示」，所有已对接的客户端会在下一次请求收到 401，
    且无法回滚（旧 key 不落任何地方），所以必须让用户再点一次。 */
+async function toggleModelPrefix(btn) {
+  // 这个开关是可逆的、不丢数据，所以单击即生效，不需要两步确认
+  const cur = document.getElementById('prefixState').textContent === '开';
+  const next = !cur;
+  const label = btn.textContent;
+  btn.disabled = true; btn.textContent = '…';
+  try {
+    const r = await apiFetch('/api/config', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ show_model_prefix: next })
+    });
+    const d = await r.json();
+    if (!d.ok) throw new Error(d.error || ('HTTP ' + r.status));
+    document.getElementById('prefixState').textContent = next ? '开' : '关';
+    showToast(next ? '已开启：回复开头会标注「🤖 供应商/模型」'
+                   : '已关闭：回复不再注入来源标注（对已接入的第三方客户端立即生效，无需重启）',
+              'ok', 4000);
+  } catch (e) {
+    if (e.message !== 'Unauthorized') showToast('设置失败: ' + e.message, 'error');
+  } finally {
+    btn.disabled = false; btn.textContent = label;
+  }
+}
+
 async function randomizeApiKey(btn) {
   if (!stepConfirm('regen-key',
       '生成后旧 Key 立即失效，所有已对接的客户端都要改成新 Key。再点一次「随机」确认')) return;

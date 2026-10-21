@@ -1,23 +1,10 @@
 {
-  "version": "2.1.2",
+  "version": "2.1.3",
   "min_version": "",
-  "release_page": "https://github.com/chenshifanjian/model-reservoir/releases/tag/v2.1.2",
-  "release_notes": "v2.1.2：把一次只读审计确认的 7 类缺陷修掉，其中两个能让网关**全路由 500 且重启依旧**。\n\n## P0：坏状态会被持久化，重启不自愈\n\n1. **routers.json 顶层是 `null` 或数组**（合法 JSON，但不是对象）→ `/v1/models` 与 `/v1/chat/completions` 全 500，重启依旧。以前只 catch `JSONDecodeError`，`null` 不是解析错误、直接返回了 `None`。现在按 config/providers 同样的方式：类型不符就留档 + 退回空表，并逐条消毒（成员必须是字符串，非列表的组直接丢弃）。\n2. **`POST /api/routers` 不校验 body** → POST 一个 `null` 或 `{\"p\": 123}` 返回 200 并**写进磁盘**，之后该组名下所有请求 500。现在落盘前校验，形状不对回 400 并说明哪一组坏了；拒绝之后磁盘保持原样（有测试专门盯这一点）。\n3. **providers.json 顶层是 `{}`** → 三个主接口全 500。加载时已判 `isinstance(list)`。\n\n## P1：未捕获异常一律回 FastAPI 默认 500\n\n全项目**没有任何 exception_handler**。这意味着上游返回畸形数据、客户端传错类型时，OpenAI 客户端拿不到 `error` 对象、Anthropic 客户端拿不到 `error.type` —— 既看不出原因也无从重试，UI 上只有一句「请求失败」。现在按协议面分三种形状兜底，并把完整堆栈写进日志（返回体只含异常类型与消息，不含本地路径与密钥）。\n\n顺带修掉四处具体的触发点：\n- 识图分支 `body.get(key, 0) > 16384`：`max_tokens` 传 `\"99999\"` 或 `null` 直接 TypeError → 现在非数字就删掉交给上游默认值\n- `_inject_cn_hint` 里 `if CN_HINT not in t`：text 块是数字 → TypeError。现在先判 `isinstance(t, str)`\n- Anthropic 翻译 `to_openai_request` 在 try **之外**：text 块畸形时抛 TypeError，客户端拿不到 Anthropic 形状的错误体。现改为 400 + Anthropic 形状（该处下方注释原本就写着这个要求，只是漏了自己这一行）\n- `PUT /api/port` 传 `\"abc\"` → 500。现在 400 + 可读理由\n\n## P2：静默产生错误状态\n\n4. **模型列表缓存只有一处失效点**（改模型能力时）→ 增删上游、改禁用列表后，30 秒内 `GET /v1/models` 仍返回已删掉的模型，客户端选中它就直接失败。现在把失效搬进 `save_providers()` 内部 —— 六个写路径全覆盖，将来新加的写点也漏不掉。\n\n## P3：写盘强度\n\n5. **`atomic_write` 不 fsync、tmp 名固定**：断电时 rename 可能先于数据落盘，文件名已换、内容还是空的 —— 这正是 config/providers 变成半截 JSON 的来源之一。现在写完 `flush()+fsync()` 再 rename，tmp 名带 pid 防两个进程互踩。\n\n## 验证\n\n269 单元测试（新增 18 例，其中一条当场抓出我自己新写代码里的一个判断 bug：消毒时判成了列表而不是成员，会把 `1`/`null` 变成字符串模型名放进来）。\n真实起服务实测：四个非法 routers 请求全 400、磁盘内容仍合法、`PUT /api/port` 传非数字 400、providers 损坏后重启存活并留档。\n",
-  "download_url_windows": "https://github.com/chenshifanjian/model-reservoir/releases/download/v2.1.2/ModelReservoir-v2.1.2-windows.exe",
-  "download_url_linux": "https://github.com/chenshifanjian/model-reservoir/releases/download/v2.1.2/ModelReservoir-v2.1.2-linux-x86_64",
-  "download_url_macos": "https://github.com/chenshifanjian/model-reservoir/releases/download/v2.1.2/ModelReservoir-v2.1.2-macos.zip",
-  "artifacts": {
-    "windows": {
-      "sha256": "be70a8bde83f233bc1d142e9ed6d794b2225a69251886feb855677305e4bb6e5",
-      "size": 30562796
-    },
-    "linux": {
-      "sha256": "eac6a9a89addedd92c364f1a8d42cf6f7fac3abb9008e6d246bfc578a74bf69e",
-      "size": 100388224
-    },
-    "macos": {
-      "sha256": "18ee82a06bb71e568918315a1a889ed1b3b1c2f1d84c0305c2cd7bfb6243b8db",
-      "size": 27623479
-    }
-  }
+  "release_page": "https://github.com/chenshifanjian/model-reservoir/releases/tag/v2.1.3",
+  "release_notes": "v2.1.3：新增「回复标注来源」开关 —— 为了接入 Hermes 这类第三方客户端。\n\n## 为什么要这个开关\n\n网关会在每条回复开头注入 `🤖 供应商/模型`，方便排查「到底谁答的」。这个行为一直写死在代码里、没有开关。当你把网关接进别的客户端（比如 Hermes、各种 IDE 插件、OpenAI SDK 应用），前缀会出现在**对方每一条回复的开头** —— 既占 token，又让对话看起来脏。\n\n## 新增\n\n上游页 API Key 那一栏下面加了「回复标注来源」一行，显示当前 开/关，点「切换」即改。\n- **默认开**，与加开关前完全一致，不影响任何现有用法\n- **立即生效，不用重启** —— 已经在跑的第三方客户端下一条回复就不带前缀了\n- 流式与非流式两条路都接了开关。漏一条就会出现「有时有前缀有时没有」，那更难查\n- 视觉切换提示（`🖼️ 已切换到视觉模型回复…`）**不受开关影响** —— 它是功能性标记，不是装饰，关掉标注来源不应该让客户端丢掉这个信息\n\n## 两个刻意的决定\n\n1. **`PUT /api/config` 严格要求布尔值**：传 `\"false\"` 这种字符串会被 400 拒绝。如果用 `if val:` 判真假，字符串 `\"false\"` 会被当成 True 存下去，而界面回读时显示成「开」—— 用户点关点不动，而且不知道为什么。\n2. **只有明确的 `False` 才关**：`\"\"`、`0`、`None` 这类被写坏的值一律回到默认（开）。否则一个坏值会让所有回复悄悄丢掉来源标注，而用户在界面上看不出原因。\n\n## 验证\n\n280 单元测试（新增 11 例），含「切开关不能顺手改掉 API Key」（那会让所有已对接的客户端 401）与「界面回读必须拿到真实开关状态」。\n",
+  "download_url_windows": "https://github.com/chenshifanjian/model-reservoir/releases/download/v2.1.3/ModelReservoir-v2.1.3-windows.exe",
+  "download_url_linux": "https://github.com/chenshifanjian/model-reservoir/releases/download/v2.1.3/ModelReservoir-v2.1.3-linux-x86_64",
+  "download_url_macos": "https://github.com/chenshifanjian/model-reservoir/releases/download/v2.1.3/ModelReservoir-v2.1.3-macos.zip",
+  "artifacts": {}
 }

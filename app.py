@@ -227,7 +227,7 @@ META_FILE = DATA_DIR / "models_meta.json"
 ROUTERS_FILE = DATA_DIR / "routers.json"
 ANNOUNCEMENT_FILE = DATA_DIR / "announcement.json"
 
-APP_VERSION = "2.1.2"
+APP_VERSION = "2.1.3"
 
 MAX_HISTORY_DAYS = 30
 MAX_USAGE_DAYS = 30        # 按天数范围查询(近24小时/7天/30天)的上限
@@ -305,7 +305,11 @@ def load_config():
                 # 而所有已对接的客户端会莫名其妙全部 401。
                 data["local_api_key"] = "sk-local-" + secrets.token_hex(16)
                 backfilled = True
-            for field, default in (("port", 8000), ("poll_count", 0), ("last_daily_poll", "")):
+            # show_model_prefix 的默认值 True 也要能被显式写成 False ——
+            # 这里判的是「字段在不在」，不是 truthy，所以 False 不会被吞
+            # （同 ttl=0 那类 `x or default` 的坑）。
+            for field, default in (("port", 8000), ("poll_count", 0),
+                                   ("last_daily_poll", ""), ("show_model_prefix", True)):
                 if field not in data:
                     data[field] = default
                     backfilled = True
@@ -318,6 +322,7 @@ def load_config():
         "port": 8000,
         "poll_count": 0,
         "last_daily_poll": "",
+        "show_model_prefix": True,
     }
     atomic_write(CONFIG_FILE, json.dumps(data, indent=2))
     return data
@@ -937,6 +942,19 @@ def local_model_id(provider_name: str, model: str) -> str:
     不要再手写 f"{provider}-{model}" 或 f"{provider} · {model}" 之类的临时拼法。
     """
     return f"{provider_name}{MODEL_ID_SEP}{model}"
+
+
+def show_model_prefix() -> bool:
+    """回复开头是否注入「🤖 供应商/模型」前缀。
+
+    默认 True（维持老行为：每条回复自带路由来源，排查「到底谁答的」很方便）。
+    接入 Hermes 之类的第三方客户端时可以关掉 —— 前缀会出现在对方每一条回复的
+    开头，既占 token 又让对话看起来脏。app.py 里流式与非流式两条路都必须问它，
+    漏一条就会出现「有时有前缀有时没有」这种更难查的现象。
+    """
+    # 只有**明确的 False** 才关。""/0/None 这类被写坏的值一律回到默认（开）——
+    # 否则一个坏值会让所有回复悄悄丢掉来源标注，而用户在界面上看不出原因。
+    return app_config.get("show_model_prefix", True) is not False
 
 
 def model_id_matches(requested: str, provider_name: str, model: str) -> bool:
@@ -1729,6 +1747,7 @@ async def index(request: Request):
         "request": request,
         "local_api_key": LOCAL_API_KEY,
         "app_version": APP_VERSION,
+        "show_model_prefix": show_model_prefix(),
     }
     return templates.TemplateResponse(request, "index.html", ctx)
 
@@ -3645,7 +3664,9 @@ async def _stream_with_failover(candidates, body, is_router, prelude: str = ""):
                             rc = delta.get("reasoning_content")
                             if isinstance(rc, str):
                                 accumulated += rc
-                        if not prefix_done:
+                        # 开关关掉时直接跳过：流式路径不能只在拼串那一步判，
+                        # 否则 prefix_done 永远不置位，每一块都会重跑这段判断
+                        if not prefix_done and show_model_prefix():
                             choices2 = obj.get("choices") or []
                             if choices2:
                                 delta2 = choices2[0].get("delta") or {}
@@ -3824,12 +3845,18 @@ async def proxy_chat(request: Request, force: bool = False):
                         c = msg.get("content")
                         prefix_parts = []
                         if vision_prelude:
+                            # vision_prelude 是功能性标记（告诉客户端已切视觉模型），
+                            # 不属于装饰，所以不受开关影响
                             prefix_parts.append(vision_prelude.rstrip())
-                        prefix_parts.append(f"🤖 {local_model_id(provider['name'], model)}")
+                        if show_model_prefix():
+                            prefix_parts.append(
+                                f"🤖 {local_model_id(provider['name'], model)}")
                         prefix = "\n\n".join(prefix_parts)
-                        if isinstance(c, str) and c:
+                        # 两样都没有时前缀是空串 —— 必须跳过赋值，
+                        # 否则空串会把上游的正文覆盖掉
+                        if prefix and isinstance(c, str) and c:
                             msg["content"] = f"{prefix}\n\n{c}"
-                        elif isinstance(c, str):
+                        elif prefix and isinstance(c, str):
                             msg["content"] = prefix
                     except (KeyError, IndexError, TypeError):
                         pass
@@ -3923,6 +3950,15 @@ async def update_config(request: Request, _=Depends(verify_admin)):
             return {"ok": True, "key": new_key}
         else:
             raise HTTPException(400, "API Key 不能为空")
+    if "show_model_prefix" in body:
+        val = body["show_model_prefix"]
+        if not isinstance(val, bool):
+            # 不能用 `if val:` 判真假：字符串 "false" 会被当成 True 存下去，
+            # 而界面回读时又显示成开，用户点关点不动
+            raise HTTPException(400, "show_model_prefix 必须是布尔值")
+        app_config["show_model_prefix"] = val
+        save_config()
+        return {"ok": True, "show_model_prefix": val}
     return {"ok": False, "error": "无可更新的字段"}
 
 

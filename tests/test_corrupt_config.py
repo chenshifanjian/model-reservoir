@@ -77,7 +77,8 @@ def test_valid_config_still_reads_back_unchanged(monkeypatch, tmp_path):
     data = app_module.load_config()
 
     assert data == {"local_api_key": "sk-local-ok", "port": 9001,
-                    "poll_count": 3, "last_daily_poll": "x"}
+                    "poll_count": 3, "last_daily_poll": "x",
+                    "show_model_prefix": True}
     assert not list(tmp_path.glob("config.json.corrupt-*")), "正常文件不该被挪走"
 
 
